@@ -1,0 +1,7 @@
+black
+clangd
+flake8
+lua-language-server
+pyright
+ruff
+stylua
