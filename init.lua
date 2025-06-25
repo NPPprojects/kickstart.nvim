@@ -1012,5 +1012,17 @@ require('lazy').setup({
   },
 })
 
+-- File: ~/.config/nvim/lua/custom/init.lua
+
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = 'markdown',
+  callback = function()
+    local path = vim.fn.expand '%:p'
+    if string.match(path, '/gp/chats/') then
+      vim.opt_local.foldmethod = 'marker'
+      vim.opt_local.foldlevel = 0 -- start folded
+    end
+  end,
+})
 -- The line beneath this is called `modeline`. See `:help modeline`
 -- vim: ts=2 sts=2 sw=2 et
