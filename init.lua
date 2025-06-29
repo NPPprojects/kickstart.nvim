@@ -198,6 +198,11 @@ vim.keymap.set('n', '<C-l>', '<C-w><C-l>', { desc = 'Move focus to the right win
 vim.keymap.set('n', '<C-j>', '<C-w><C-j>', { desc = 'Move focus to the lower window' })
 vim.keymap.set('n', '<C-k>', '<C-w><C-k>', { desc = 'Move focus to the upper window' })
 
+
+
+vim.keymap.set('n', '<leader>v', ':vsplit ', { noremap = true })
+vim.keymap.set('n', '<leader>h', ':split ', { noremap = true })
+
 -- NOTE: Some terminals have colliding keymaps or are not able to send distinct keycodes
 -- vim.keymap.set("n", "<C-S-h>", "<C-w>H", { desc = "Move window to the left" })
 -- vim.keymap.set("n", "<C-S-l>", "<C-w>L", { desc = "Move window to the right" })
@@ -298,7 +303,7 @@ require('lazy').setup({
   -- Then, because we use the `opts` key (recommended), the configuration runs
   -- after the plugin has been loaded as `require(MODULE).setup(opts)`.
 
-  { -- Useful plugin to show you pending keybinds.
+  {                     -- Useful plugin to show you pending keybinds.
     'folke/which-key.nvim',
     event = 'VimEnter', -- Sets the loading event to 'VimEnter'
     opts = {
@@ -379,7 +384,7 @@ require('lazy').setup({
       { 'nvim-telescope/telescope-ui-select.nvim' },
 
       -- Useful for getting pretty icons, but requires a Nerd Font.
-      { 'nvim-tree/nvim-web-devicons', enabled = vim.g.have_nerd_font },
+      { 'nvim-tree/nvim-web-devicons',            enabled = vim.g.have_nerd_font },
     },
     config = function()
       -- Telescope is a fuzzy finder that comes with a lot of different things that
@@ -437,6 +442,32 @@ require('lazy').setup({
       vim.keymap.set('n', '<leader>s.', builtin.oldfiles, { desc = '[S]earch Recent Files ("." for repeat)' })
       vim.keymap.set('n', '<leader><leader>', builtin.buffers, { desc = '[ ] Find existing buffers' })
 
+      -- Toggle folds manually
+      vim.keymap.set("n", "zR", require("ufo").openAllFolds, { desc = "Open all folds" })
+      vim.keymap.set("n", "zM", require("ufo").closeAllFolds, { desc = "Close all folds" })
+
+
+      --controls for rezising windows
+
+      vim.keymap.set('n', '<C-Left>', require('smart-splits').resize_left)
+      vim.keymap.set('n', '<C-Right>', require('smart-splits').resize_right)
+      vim.keymap.set('n', '<C-Up>', require('smart-splits').resize_up)
+      vim.keymap.set('n', '<C-Down>', require('smart-splits').resize_down)
+
+
+      vim.keymap.set('n', '<M-Left>', require('smart-splits').swap_buf_left, { noremap = true, silent = true })
+      vim.keymap.set('n', '<M-Down>', require('smart-splits').swap_buf_down, { noremap = true, silent = true })
+      vim.keymap.set('n', '<M-Up>', require('smart-splits').swap_buf_up, { noremap = true, silent = true })
+      vim.keymap.set('n', '<M-Right>', require('smart-splits').swap_buf_right, { noremap = true, silent = true })
+
+
+
+
+
+      -- You can still use zf, zd, zo, zc for manual control
+
+
+
       -- Slightly advanced example of overriding default behavior and theme
       vim.keymap.set('n', '<leader>/', function()
         -- You can pass additional configuration to Telescope to change the theme, layout, etc.
@@ -487,7 +518,7 @@ require('lazy').setup({
       'WhoIsSethDaniel/mason-tool-installer.nvim',
 
       -- Useful status updates for LSP.
-      { 'j-hui/fidget.nvim', opts = {} },
+      { 'j-hui/fidget.nvim',    opts = {} },
 
       -- Allows extra capabilities provided by blink.cmp
       'saghen/blink.cmp',
@@ -1024,5 +1055,12 @@ vim.api.nvim_create_autocmd('FileType', {
     end
   end,
 })
+
+--Custom commands
+
+vim.api.nvim_create_user_command('Snmap', function()
+  vim.cmd("redir @a | silent nmap | redir END | new | put a")
+end, {})
+
 -- The line beneath this is called `modeline`. See `:help modeline`
 -- vim: ts=2 sts=2 sw=2 et
