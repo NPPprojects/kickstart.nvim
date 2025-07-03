@@ -15,12 +15,12 @@ return {
 
 		-- Multi-file paste helper
 
+
+		-- Inside your plugin config block
 		function PasteFilesToGpChat(files)
 			local bufnr = vim.api.nvim_get_current_buf()
-
-			-- Manual extension-to-language mapping
 			local lang_map = {
-				h = "c", -- assume C for .h
+				h = "c",
 				cpp = "cpp",
 				c = "c",
 				py = "python",
@@ -37,28 +37,28 @@ return {
 			for _, file in ipairs(files) do
 				if vim.fn.filereadable(file) == 1 then
 					local lines = vim.fn.readfile(file)
-					local joined = table.concat(lines, '\n')
-
-					local ext = vim.fn.fnamemodify(file, ':e')
-					local lang = lang_map[ext] or ext -- fallback to ext itself if unknown
-
+					local ext = vim.fn.fnamemodify(file, ":e")
+					local lang = lang_map[ext] or ext
 					local block = {
-						'',
-						'---',
-						'### ' .. file,
-						'{{{',
-						'```' .. lang,
+						"", "---", "### " .. file, "{{{", "```" .. lang,
 					}
-
-					vim.list_extend(block, vim.split(joined, '\n'))
-					table.insert(block, '```')
-					table.insert(block, '}}}')
-
+					vim.list_extend(block, lines)
+					table.insert(block, "```")
+					table.insert(block, "}}}")
 					vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, block)
 				else
-					print('File not found: ' .. file)
+					print("File not found: " .. file)
 				end
 			end
 		end
+
+		vim.api.nvim_create_user_command("PasteFiles", function(opts)
+			local files = vim.tbl_map(vim.fn.expand, opts.fargs)
+			PasteFilesToGpChat(files)
+		end, {
+			nargs = "+",
+			complete = "file",
+			desc = "Paste one or more files into the GP buffer",
+		})
 	end,
 }
