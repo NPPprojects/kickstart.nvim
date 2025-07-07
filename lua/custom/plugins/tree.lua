@@ -18,11 +18,7 @@ return {
 					buf_map("h", api.node.open.horizontal_no_picker, "Open in Horizontal Split")
 				end,
 
-				view = {
-					mappings = {
-						list = {}, -- no need to define here for splits
-					},
-				},
+
 
 				actions = {
 					open_file = {

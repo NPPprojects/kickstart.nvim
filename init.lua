@@ -1045,7 +1045,7 @@ require('lazy').setup({
 
 
 --Folds Saving
---require("save_folds").setup()
+require("save_folds").setup()
 -- File: ~/.config/nvim/lua/custom/init.lua
 
 vim.api.nvim_create_autocmd('FileType', {
