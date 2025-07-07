@@ -926,7 +926,7 @@ require('lazy').setup({
       -- Load the colorscheme here.
       -- Like many other themes, this one has different styles, and you could load
       -- any other, such as 'tokyonight-storm', 'tokyonight-moon', or 'tokyonight-day'.
-      vim.cmd.colorscheme 'tokyonight-night'
+      vim.cmd.colorscheme 'catppuccin'
     end,
   },
 
@@ -1045,7 +1045,7 @@ require('lazy').setup({
 
 
 --Folds Saving
-require("save_folds").setup()
+--require("save_folds").setup()
 -- File: ~/.config/nvim/lua/custom/init.lua
 
 vim.api.nvim_create_autocmd('FileType', {
