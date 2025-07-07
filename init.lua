@@ -1043,6 +1043,9 @@ require('lazy').setup({
   },
 })
 
+
+--Folds Saving
+require("save_folds").setup()
 -- File: ~/.config/nvim/lua/custom/init.lua
 
 vim.api.nvim_create_autocmd('FileType', {
@@ -1061,6 +1064,8 @@ vim.api.nvim_create_autocmd('FileType', {
 vim.api.nvim_create_user_command('Snmap', function()
   vim.cmd("redir @a | silent nmap | redir END | new | put a")
 end, {})
+
+
 
 -- The line beneath this is called `modeline`. See `:help modeline`
 -- vim: ts=2 sts=2 sw=2 et
