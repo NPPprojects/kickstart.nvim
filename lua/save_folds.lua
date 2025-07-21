@@ -3,18 +3,27 @@
 local M = {}
 
 function M.setup()
-	-- Save folds and cursor position automatically
 	vim.opt.viewoptions = { "cursor", "folds", "slash", "unix" }
 
 	vim.api.nvim_create_autocmd("BufWinLeave", {
 		pattern = "*",
-		command = "mkview",
+		callback = function()
+			local bufname = vim.api.nvim_buf_get_name(0)
+			if bufname ~= "" and vim.bo.buftype == "" then
+				vim.cmd("mkview")
+			end
+		end,
 	})
 
 	vim.api.nvim_create_autocmd("BufWinEnter", {
 		pattern = "*",
-		command = "silent! loadview",
+		callback = function()
+			local bufname = vim.api.nvim_buf_get_name(0)
+			if bufname ~= "" and vim.bo.buftype == "" then
+				vim.cmd("silent! loadview")
+			end
+		end,
 	})
 end
 
-return M
+return M -- ← THIS must exist!
