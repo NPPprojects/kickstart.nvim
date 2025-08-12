@@ -1043,6 +1043,9 @@ require('lazy').setup({
   },
 })
 
+vim.keymap.set('n', 'zZ', vim.lsp.buf.code_action,
+  { noremap = true, silent = true, desc = "LSP Code Action" })
+
 
 --Folds Saving
 require("save_folds").setup()
@@ -1064,6 +1067,7 @@ vim.api.nvim_create_autocmd('FileType', {
 vim.api.nvim_create_user_command('Snmap', function()
   vim.cmd("redir @a | silent nmap | redir END | new | put a")
 end, {})
+
 
 
 
