@@ -1,30 +1,18 @@
 return {
 	"folke/noice.nvim",
-	dependencies = {
-		"MunifTanjim/nui.nvim",
-		"rcarriga/nvim-notify",
-	},
+	dependencies = { "MunifTanjim/nui.nvim", "rcarriga/nvim-notify" },
 	opts = {
-		cmdline = {
-			view = "cmdline_popup",
-		},
+		messages = { enabled = false }, -- <— turn off Noice message UI
+		cmdline = { view = "cmdline_popup" },
 		views = {
 			cmdline_popup = {
-				position = {
-					row = "50%", -- vertical center
-					col = "50%", -- horizontal center
-				},
-				size = {
-					width = 60,
-					height = "auto",
-				},
+				position = { row = "50%", col = "50%" },
+				size = { width = 60, height = "auto" },
 			},
 		},
 		routes = {
-			{
-				view = "notify",
-				filter = { event = "msg_showmode" }, -- show messages like "recording @q"
-			},
+			-- Show normal messages (incl. :! output) in a split, not a popup
+			{ view = "notify", filter = { event = "msg_showmode" } },
 		},
 	},
 }
