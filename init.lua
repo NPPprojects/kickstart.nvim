@@ -1069,6 +1069,7 @@ vim.api.nvim_create_user_command('Snmap', function()
 end, {})
 
 
+require("custom.keymaps.flutter")
 
 
 -- The line beneath this is called `modeline`. See `:help modeline`
