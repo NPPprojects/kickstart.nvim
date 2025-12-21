@@ -460,7 +460,8 @@ require('lazy').setup({
       vim.keymap.set('n', '<M-Up>', require('smart-splits').swap_buf_up, { noremap = true, silent = true })
       vim.keymap.set('n', '<M-Right>', require('smart-splits').swap_buf_right, { noremap = true, silent = true })
 
-
+      -- pasted over things go to black hole register
+      vim.keymap.set("x", "p", '"_dP', { noremap = true, silent = true })
 
 
 
