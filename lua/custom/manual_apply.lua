@@ -1,6 +1,7 @@
 local M = {}
 
-local PAYLOAD_PATTERN = '^/tmp/xcodex%-manual%-apply%-.+%.json$'
+local PAYLOAD_PATTERN = '^/tmp/xcodex%-manual%-apply%-.+[^%.result]%.json$'
+local RESULT_SUFFIX = '.result.json'
 local NS = vim.api.nvim_create_namespace 'CodexManualApply'
 local ACTIVE = {}
 local LAST_CLEARED = {}
@@ -16,19 +17,23 @@ local function notify(msg, level)
   vim.notify(msg, level or vim.log.levels.INFO, { title = 'Codex Manual Apply' })
 end
 
-local function read_payload(payload_path)
-  local ok, lines = pcall(vim.fn.readfile, payload_path)
+local function read_json_file(path)
+  local ok, lines = pcall(vim.fn.readfile, path)
   if not ok then
-    return nil, 'Failed to read payload file: ' .. payload_path
+    return nil, 'Failed to read file: ' .. path
   end
 
   local content = table.concat(lines, '\n')
   local decode_ok, data = pcall(vim.fn.json_decode, content)
   if not decode_ok or type(data) ~= 'table' then
-    return nil, 'Invalid JSON payload: ' .. payload_path
+    return nil, 'Invalid JSON file: ' .. path
   end
 
   return data
+end
+
+local function read_payload(payload_path)
+  return read_json_file(payload_path)
 end
 
 local function split_lines(text)
@@ -55,6 +60,29 @@ local function parse_diff(diff)
   end
 
   return start_line, split_lines(diff)
+end
+
+local function result_path_for_payload(payload_path)
+  return payload_path:gsub('%.json$', RESULT_SUFFIX)
+end
+
+local function write_result(payload_path, approval_id, status)
+  local result_path = result_path_for_payload(payload_path)
+  local payload = {
+    schema_version = 1,
+    kind = 'manual_patch_apply_result',
+    approval_id = approval_id,
+    status = status,
+  }
+
+  local encoded = vim.fn.json_encode(payload)
+  local ok, err = pcall(vim.fn.writefile, vim.split(encoded, '\n', { plain = true }), result_path)
+  if not ok then
+    notify('Failed to write result file: ' .. tostring(err), vim.log.levels.ERROR)
+    return false
+  end
+
+  return true
 end
 
 local function gen_diff_chunks(expected, typed)
@@ -102,19 +130,28 @@ local function gen_diff_chunks(expected, typed)
   return chunks, mismatch_ranges, matched and typed == expected
 end
 
-local function clear_overlay(buf)
+local function clear_overlay(buf, opts)
+  opts = opts or {}
   local state = ACTIVE[buf]
+
   if vim.api.nvim_buf_is_valid(buf) then
     vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
   end
+
   if state then
     LAST_CLEARED[buf] = vim.deepcopy(state)
+    if opts.write_status and state.payload_path and state.approval_id and not state.result_written then
+      if write_result(state.payload_path, state.approval_id, opts.write_status) then
+        state.result_written = true
+      end
+    end
   end
+
   ACTIVE[buf] = nil
 end
 
 function M.clear_current()
-  clear_overlay(vim.api.nvim_get_current_buf())
+  clear_overlay(vim.api.nvim_get_current_buf(), { write_status = 'completed' })
 end
 
 function M.restore_current()
@@ -173,16 +210,26 @@ render_overlay = function(buf)
   end
 
   if all_matched then
+    if state.payload_path and state.approval_id and not state.result_written then
+      if write_result(state.payload_path, state.approval_id, 'completed') then
+        state.result_written = true
+      else
+        return
+      end
+    end
     clear_overlay(buf)
   end
 end
 
-local function attach_overlay(buf, start_row, lines)
+local function attach_overlay(buf, start_row, lines, payload_path, approval_id)
   clear_overlay(buf)
 
   ACTIVE[buf] = {
     start_row = start_row,
     lines = lines,
+    payload_path = payload_path,
+    approval_id = approval_id,
+    result_written = false,
   }
 
   ensure_highlights()
@@ -225,7 +272,15 @@ local function attach_overlay(buf, start_row, lines)
 end
 
 function M.is_payload_path(path)
-  return type(path) == 'string' and path:match(PAYLOAD_PATTERN) ~= nil
+  if type(path) ~= 'string' then
+    return false
+  end
+
+  if path:sub(- #RESULT_SUFFIX) == RESULT_SUFFIX then
+    return false
+  end
+
+  return path:match('^/tmp/xcodex%-manual%-apply%-.+%.json$') ~= nil
 end
 
 function M.run(payload_path)
@@ -241,6 +296,11 @@ function M.run(payload_path)
 
   if data.kind ~= 'manual_patch_apply_request' or type(data.changes) ~= 'table' or type(data.changes[1]) ~= 'table' then
     notify('Payload is missing required manual-apply fields', vim.log.levels.ERROR)
+    return false
+  end
+
+  if type(data.approval_id) ~= 'string' or data.approval_id == '' then
+    notify('Payload is missing a valid approval_id', vim.log.levels.ERROR)
     return false
   end
 
@@ -267,7 +327,7 @@ function M.run(payload_path)
   local line_count = vim.api.nvim_buf_line_count(0)
   start_line = math.max(1, math.min(start_line, line_count + 1))
   vim.api.nvim_buf_set_lines(buf, start_line - 1, start_line - 1, false, vim.fn['repeat']({ '' }, #added_lines))
-  attach_overlay(buf, start_line - 1, added_lines)
+  attach_overlay(buf, start_line - 1, added_lines, payload_path, data.approval_id)
   vim.api.nvim_win_set_cursor(0, { start_line, 0 })
 
   return true
