@@ -11,6 +11,7 @@ local function ensure_highlights()
   vim.api.nvim_set_hl(0, 'CodexManualApplyPending', { link = 'Comment', default = true })
   vim.api.nvim_set_hl(0, 'CodexManualApplyMatch', { link = 'DiffAdd', default = true })
   vim.api.nvim_set_hl(0, 'CodexManualApplyMismatch', { link = 'DiagnosticError', default = true })
+  vim.api.nvim_set_hl(0, 'CodexManualApplyDelete', { link = 'DiffDelete', default = true })
 end
 
 local function notify(msg, level)
@@ -44,22 +45,45 @@ local function split_lines(text)
   return vim.split(text, '\n', { plain = true })
 end
 
-local function parse_diff(diff)
-  local start_line = tonumber(diff:match('@@ %-%d+,?%d* %+(%d+),?%d* @@')) or 1
-  local added_lines = {}
+local function parse_hunk_count(raw_count)
+  if raw_count == nil or raw_count == '' then
+    return 1
+  end
 
-  for _, line in ipairs(split_lines(diff)) do
-    if vim.startswith(line, '+++') then
-    elseif vim.startswith(line, '+') then
-      table.insert(added_lines, line:sub(2))
+  return tonumber(raw_count) or 1
+end
+
+local function parse_diff(diff)
+  local lines = split_lines(diff)
+
+  for i, line in ipairs(lines) do
+    local old_start, old_count, new_start, new_count =
+      line:match('^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@')
+
+    if old_start then
+      local parsed_old_count = parse_hunk_count(old_count)
+      local parsed_new_count = parse_hunk_count(new_count)
+      local target_lines = {}
+
+      for body_index = i + 1, #lines do
+        local body_line = lines[body_index]
+        if vim.startswith(body_line, '@@ ') then
+          break
+        end
+
+        if vim.startswith(body_line, ' ') then
+          table.insert(target_lines, body_line:sub(2))
+        elseif vim.startswith(body_line, '+') and not vim.startswith(body_line, '+++') then
+          table.insert(target_lines, body_line:sub(2))
+        end
+      end
+
+      local start_line = parsed_old_count == 0 and tonumber(new_start) or tonumber(old_start)
+      return start_line or 1, parsed_old_count, target_lines
     end
   end
 
-  if #added_lines > 0 then
-    return start_line, added_lines
-  end
-
-  return start_line, split_lines(diff)
+  return 1, 0, lines
 end
 
 local function result_path_for_payload(payload_path)
@@ -130,6 +154,46 @@ local function gen_diff_chunks(expected, typed)
   return chunks, mismatch_ranges, matched and typed == expected
 end
 
+local function lines_match(actual, expected)
+  if #actual ~= #expected then
+    return false
+  end
+
+  for i = 1, #expected do
+    if actual[i] ~= expected[i] then
+      return false
+    end
+  end
+
+  return true
+end
+
+local function region_matches(buf, state)
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  local actual = vim.api.nvim_buf_get_lines(
+    buf,
+    state.start_row,
+    math.min(state.start_row + #state.target_lines, line_count),
+    false
+  )
+
+  if not lines_match(actual, state.target_lines) then
+    return false
+  end
+
+  if state.trailing_anchor ~= nil then
+    local anchor_row = state.start_row + #state.target_lines
+    local anchor = vim.api.nvim_buf_get_lines(buf, anchor_row, anchor_row + 1, false)[1]
+    return anchor == state.trailing_anchor
+  end
+
+  if state.expected_line_count ~= nil then
+    return line_count == state.expected_line_count
+  end
+
+  return true
+end
+
 local function clear_overlay(buf, opts)
   opts = opts or {}
   local state = ACTIVE[buf]
@@ -175,41 +239,53 @@ render_overlay = function(buf)
   end
 
   local line_count = vim.api.nvim_buf_line_count(buf)
-  local all_matched = true
+  local target_len = #state.target_lines
+  local display_len = math.max(target_len, state.old_line_count)
 
   vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
 
-  for i, expected in ipairs(state.lines) do
+  for i = 1, display_len do
     local row = state.start_row + i - 1
-    if row >= line_count then
-      all_matched = false
-      break
-    end
+    local expected = state.target_lines[i]
 
-    local typed = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ''
-    local chunks, mismatch_ranges, matched = gen_diff_chunks(expected, typed)
-    all_matched = all_matched and matched
+    if expected ~= nil then
+      local typed = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ''
+      local chunks, mismatch_ranges = gen_diff_chunks(expected, typed)
 
-    if #chunks > 0 then
+      if #chunks > 0 then
+        vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
+          virt_text = chunks,
+          virt_text_pos = 'overlay',
+          hl_mode = 'combine',
+          priority = 200,
+        })
+      end
+
+      for _, range in ipairs(mismatch_ranges) do
+        vim.api.nvim_buf_set_extmark(buf, NS, row, range[1], {
+          end_row = row,
+          end_col = range[2],
+          hl_group = 'CodexManualApplyMismatch',
+          priority = 201,
+        })
+      end
+    elseif row < line_count then
+      local line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ''
       vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
-        virt_text = chunks,
-        virt_text_pos = 'overlay',
-        hl_mode = 'combine',
+        end_row = row,
+        end_col = #line,
+        hl_group = 'CodexManualApplyDelete',
         priority = 200,
       })
-    end
-
-    for _, range in ipairs(mismatch_ranges) do
-      vim.api.nvim_buf_set_extmark(buf, NS, row, range[1], {
-        end_row = row,
-        end_col = range[2],
-        hl_group = 'CodexManualApplyMismatch',
+      vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
+        virt_text = { { ' delete line', 'CodexManualApplyDelete' } },
+        virt_text_pos = 'eol',
         priority = 201,
       })
     end
   end
 
-  if all_matched then
+  if region_matches(buf, state) then
     if state.payload_path and state.approval_id and not state.result_written then
       if write_result(state.payload_path, state.approval_id, 'completed') then
         state.result_written = true
@@ -221,12 +297,24 @@ render_overlay = function(buf)
   end
 end
 
-local function attach_overlay(buf, start_row, lines, payload_path, approval_id)
+local function attach_overlay(
+  buf,
+  start_row,
+  old_line_count,
+  target_lines,
+  trailing_anchor,
+  expected_line_count,
+  payload_path,
+  approval_id
+)
   clear_overlay(buf)
 
   ACTIVE[buf] = {
     start_row = start_row,
-    lines = lines,
+    old_line_count = old_line_count,
+    target_lines = target_lines,
+    trailing_anchor = trailing_anchor,
+    expected_line_count = expected_line_count,
     payload_path = payload_path,
     approval_id = approval_id,
     result_written = false,
@@ -316,18 +404,31 @@ function M.run(payload_path)
   end
 
   local diff = type(change.diff) == 'string' and change.diff or ''
-  local start_line, added_lines = parse_diff(diff)
-  if #added_lines == 0 then
-    added_lines = { '' }
-  end
-
   vim.cmd('edit ' .. vim.fn.fnameescape(change.path))
 
   local buf = vim.api.nvim_get_current_buf()
-  local line_count = vim.api.nvim_buf_line_count(0)
-  start_line = math.max(1, math.min(start_line, line_count + 1))
-  vim.api.nvim_buf_set_lines(buf, start_line - 1, start_line - 1, false, vim.fn['repeat']({ '' }, #added_lines))
-  attach_overlay(buf, start_line - 1, added_lines, payload_path, data.approval_id)
+  local original_line_count = vim.api.nvim_buf_line_count(0)
+  local start_line, old_line_count, target_lines = parse_diff(diff)
+  start_line = math.max(1, math.min(start_line, original_line_count + 1))
+
+  local start_row = start_line - 1
+  local trailing_anchor = vim.api.nvim_buf_get_lines(buf, start_row + old_line_count, start_row + old_line_count + 1, false)[1]
+  local expected_line_count = original_line_count - old_line_count + #target_lines
+  local placeholder_count = math.max(#target_lines - old_line_count, 0)
+  if placeholder_count > 0 then
+    vim.api.nvim_buf_set_lines(buf, start_row, start_row, false, vim.fn['repeat']({ '' }, placeholder_count))
+  end
+
+  attach_overlay(
+    buf,
+    start_row,
+    old_line_count,
+    target_lines,
+    trailing_anchor,
+    expected_line_count,
+    payload_path,
+    data.approval_id
+  )
   vim.api.nvim_win_set_cursor(0, { start_line, 0 })
 
   return true

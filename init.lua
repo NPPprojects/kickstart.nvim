@@ -1063,6 +1063,19 @@ vim.api.nvim_create_autocmd('FileType', {
   end,
 })
 
+vim.api.nvim_create_autocmd('BufReadPost', {
+  group = vim.api.nvim_create_augroup('codex-manual-apply', { clear = true }),
+  pattern = '*',
+  callback = function(args)
+    local path = vim.api.nvim_buf_get_name(args.buf)
+    if require('custom.manual_apply').is_payload_path(path) then
+      vim.schedule(function()
+        require('custom.manual_apply').run(path)
+      end)
+    end
+  end,
+})
+
 --Custom commands
 
 vim.api.nvim_create_user_command('Snmap', function()
