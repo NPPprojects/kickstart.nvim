@@ -1,59 +1,86 @@
 # AI Integration Spec / Design / Development
 
-## 1. Specification
+## 1. Purpose
 
-### 1.1 Feature Name
+The Neovim manual-apply flow is the bridge between a Codex CLI approval and a real editor session.
 
-Manual Patch Apply for Neovim Integration
+The old version tried to make multi-hunk editing feel live by:
 
-### 1.2 Purpose
+- precomputing every hunk position up front
+- inserting placeholder blank lines into the real buffer
+- overlaying expected final text on top of those fixed coordinates
 
-This feature provides a manual patch-application workflow between Codex CLI and Neovim.
+That model works for a single local edit and short replace hunks. It falls apart when multiple hunks are active because every later hunk depends on earlier line-count assumptions staying true while the user is still editing.
 
-Instead of applying an AI patch directly, the CLI hands Neovim a structured payload. Neovim opens the target file, places the cursor at the target region, and overlays the expected final text so the user can type or adjust the change manually.
+The rebuilt system is hunk-centric instead of buffer-geometry-centric:
 
-### 1.3 Current Scope
+- each hunk gets its own tracked range in the target buffer
+- range boundaries are extmarks, so they move with user edits
+- no placeholder lines are inserted into the file
+- completion is evaluated per hunk against the live text inside that hunk range
 
-Implemented today:
+## 2. Old System Review
 
-- payload-driven handoff from a temporary JSON file into Neovim
-- automatic detection of manual-apply payload buffers on `BufReadPost`
-- validation of payload shape, `approval_id`, and target file existence
-- unified-diff parsing for the first hunk in the first change
-- in-buffer overlay rendering using extmarks
-- placeholder blank-line insertion when the target replacement is longer than the replaced region
-- live comparison between typed buffer content and expected target lines
-- automatic completion detection and result-file writeback
-- manual overlay clear and undo-based restore behavior
+### 2.1 What It Did Well
+
+- very small dependency-free implementation
+- payload handoff from CLI into Neovim was already simple and reliable
+- overlay rendering made the expected end state visible without inserting comments
+- line-by-line typing feedback was useful for one local edit
+- completion writeback through `<payload>.result.json` already matched the CLI workflow
+
+### 2.2 Hard Constraints In The Old Design
+
+- only one target file was practical
+- all hunk start rows were calculated once at launch time
+- later hunk coordinates depended on placeholder insertion and assumed line deltas
+- completion used exact global region checks against those frozen coordinates
+- the target buffer was mutated before the user had finished deciding what to do
+
+### 2.3 Failure Modes
+
+- editing an earlier hunk could invalidate every later hunk's assumed row range
+- insertion-heavy diffs required placeholder blanks, which changed the real buffer before acceptance
+- `clear_current()` wrote `completed`, so dismissal and success were conflated
+- the design doc overstated multi-hunk support because rendering multiple hunks is not the same thing as tracking them robustly
+- the model had no clean separation between anchor state and render state, so the whole system depended on one shared geometry pass
+
+## 3. Replacement Design
+
+### 3.1 Scope
+
+Implemented now:
+
+- payload-driven handoff from `/tmp/xcodex-manual-apply-*.json`
+- validation of payload shape and target path
+- support for multiple hunks across one target file
+- support for multiple `changes[]` entries only when they all target the same file
+- stable per-hunk tracking using extmark anchors
+- overlay rendering without modifying the target buffer
+- per-hunk status headers plus pending/match/mismatch/delete feedback
+- explicit `dismissed` result status
+- reversible overlay hide/restore flow
+- hunk navigation keymaps
 
 Not implemented:
 
+- multi-file payload sessions
+- fuzzy relocation if diff coordinates no longer match the file well
+- three-way merge behavior
 - automatic patch application
-- multi-change or multi-file navigation
-- full diff review UI
-- exact deletion assistance beyond highlighting replaced/deleted lines
-- synchronization of user edits back into Codex beyond completion status
+- rich review UI outside the edited buffer
 
-### 1.4 Goals
+### 3.2 Input Contract
 
-- Open the correct file from a Codex CLI action
-- Move the cursor to the relevant change location
-- Show the intended final text without modifying it into the buffer as comments
-- Let the user type, revise, or ignore the suggestion
-- Report manual-apply completion state back through a result file
-- Keep the implementation dependency-free and editor-native
-
-### 1.5 Input Contract
-
-The module only accepts payload paths matching:
+Accepted payload path:
 
 ```text
 /tmp/xcodex-manual-apply-*.json
 ```
 
-It explicitly ignores result files ending in `.result.json`.
+Result files ending in `.result.json` are ignored.
 
-Expected request payload:
+Expected payload:
 
 ```json
 {
@@ -69,26 +96,17 @@ Expected request payload:
 }
 ```
 
-Required top-level fields:
+Rules:
 
-- `kind`, must be `manual_patch_apply_request`
-- `approval_id`, non-empty string
-- `changes`, array with at least one entry
+- `kind` must be `manual_patch_apply_request`
+- `approval_id` must be a non-empty string
+- `changes` must contain at least one change
+- every change must target the same absolute file path
+- every change must contain a unified diff with at least one hunk
 
-Required fields on `changes[1]`:
+### 3.3 Output Contract
 
-- `path`, absolute file path to edit
-- `diff`, unified diff text
-
-Current implementation notes:
-
-- only `changes[1]` is used
-- `change.kind` is currently ignored
-- only the first diff hunk is parsed for positioning/rendering
-
-### 1.6 Output Contract
-
-When the manual apply is completed or explicitly cleared, Neovim writes:
+The module writes:
 
 ```text
 <payload>.result.json
@@ -98,238 +116,95 @@ Current result shape:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "kind": "manual_patch_apply_result",
   "approval_id": "example-approval-id",
   "status": "completed"
 }
 ```
 
-Currently emitted statuses:
+Statuses:
 
-- `completed`, when the target region matches the expected post-patch content
+- `completed`: every tracked hunk range exactly matches the diff's new lines
+- `dismissed`: the user explicitly skips the request with the dedicated skip action
 
-The clear path also requests a `completed` write today, so there is not yet a distinct cancelled/skipped status.
+### 3.4 Runtime Model
 
-### 1.7 Success Criteria
-
-The feature is successful if:
-
-- opening a manual-apply payload reliably opens the target file
-- the cursor lands at the parsed hunk start or a clamped nearby line
-- the expected edit is visible immediately as an overlay
-- the overlay updates as the user types
-- completion is detected once the edited region matches the expected lines
-- a result file is written for the associated `approval_id`
-
-## 2. Design
-
-### 2.1 Runtime Flow
+Flow:
 
 ```text
 Codex CLI
--> writes /tmp/xcodex-manual-apply-*.json
--> Neovim opens that payload file
--> BufReadPost autocmd detects a manual-apply payload path
+-> writes manual-apply payload
+-> Neovim opens payload file
+-> BufReadPost detects payload path
 -> require('custom.manual_apply').run(path)
--> payload is validated and decoded
--> first change and first hunk are parsed
+-> payload is decoded and validated
+-> all hunks for the single target file are parsed and sorted
 -> target file is opened
--> overlay state is attached to the target buffer
--> cursor moves to the target line
--> user edits the real buffer contents
--> on each buffer change, overlay re-renders and compares actual vs expected text
--> when the region matches, result file is written and overlay is cleared
+-> each hunk gets start/end extmark anchors in the real buffer
+-> renderer compares the live text inside each anchored range to the expected new lines
+-> overlays show progress without inserting placeholder content
+-> when all hunks match, result file is written and the overlay is cleared
 ```
 
-### 2.2 Integration Point
+Key architectural change:
 
-The entry wiring lives in [init.lua](/home/neepo/.config/nvim/init.lua#L1066):
+- hunk anchors live in a dedicated namespace
+- render overlays live in a separate namespace
+- clearing render output no longer destroys the tracking model by accident
 
-- a `BufReadPost` autocmd checks whether the opened buffer path is a manual-apply payload
-- if so, it schedules `require('custom.manual_apply').run(path)`
+### 3.5 UX Controls
 
-The main implementation lives in [manual_apply.lua](/home/neepo/.config/nvim/lua/custom/manual_apply.lua).
+Buffer-local controls:
 
-### 2.3 Core Components
+- `<leader>m`: hide the overlay without finalizing the request
+- `u`: restore the most recently hidden overlay when no manual-apply session is active
+- `<leader>M`: mark the request `dismissed` and clear it
+- `]m`: jump to next hunk
+- `[m`: jump to previous hunk
 
-#### Payload Gate
+## 4. Constraints Of The New System
 
-`is_payload_path(path)` accepts only the expected `/tmp/xcodex-manual-apply-*.json` request files and rejects `.result.json`.
+The rebuild fixes the core multi-hunk instability, but it is still intentionally constrained:
 
-#### Payload Reader
+- single-file only
+- line-oriented only; no character-precise patch semantics across line boundaries
+- no fuzzy search if the file no longer resembles the diff context
+- overlapping hunks are rejected
+- restore recreates anchors from the last hidden positions; it is not a durable session store
 
-`read_json_file()` uses `vim.fn.readfile()` and `vim.fn.json_decode()` with protected calls and returns structured errors on read/decode failure.
+Those constraints are acceptable because they are explicit and mechanically defensible. They do not pretend to solve merge logic with overlay tricks.
 
-#### Diff Parser
+## 5. Implementation Notes
 
-`parse_diff(diff)`:
-
-- finds the first hunk header matching `@@ -old_start,old_count +new_start,new_count @@`
-- parses old and new counts with a default count of `1`
-- builds `target_lines` from context lines (` ` prefix) plus added lines (`+` prefix, excluding `+++`)
-- ignores removed lines when building the expected final text
-- returns `(start_line, old_line_count, target_lines)`
-- falls back to `(1, 0, raw_diff_lines)` if no hunk is parsed
-
-This means the overlay represents the expected final content of the replaced region, not a literal visual diff.
-
-#### Overlay Renderer
-
-The renderer uses extmarks in the `CodexManualApply` namespace.
-
-Highlights:
-
-- `CodexManualApplyPending` for not-yet-typed expected text
-- `CodexManualApplyMatch` for typed text matching the expected content
-- `CodexManualApplyMismatch` for incorrect typed characters
-- `CodexManualApplyDelete` for lines expected to be removed
-
-Rendering behavior:
-
-- expected text is shown with `virt_text_pos = 'overlay'`
-- typed characters are compared character-by-character against expected text
-- mismatched spans also receive explicit highlight extmarks
-- extra old lines beyond the new target region are highlighted as deletions with ` delete line` virtual text
-
-#### Buffer State Tracker
-
-Per-buffer state is stored in `ACTIVE[buf]` and includes:
-
-- `start_row`
-- `old_line_count`
-- `target_lines`
-- `trailing_anchor`
-- `expected_line_count`
-- `payload_path`
-- `approval_id`
-- `result_written`
-
-`LAST_CLEARED[buf]` stores the most recently cleared overlay so it can be restored with the custom undo behavior.
-
-### 2.4 Buffer Mutation Strategy
-
-The module does not insert a comment block.
-
-Instead:
-
-- it opens the real target file
-- computes the expected replacement region from the diff
-- inserts blank placeholder lines only when the new content is longer than the replaced region
-- leaves the actual edit to the user
-- uses overlay extmarks so the expected text remains visible while typing
-
-This keeps the real file contents close to the intended final edit workflow and avoids filetype-specific comment handling.
-
-### 2.5 Completion Detection
-
-`region_matches()` treats the manual apply as complete when:
-
-- the buffer lines in the tracked region exactly equal `target_lines`
-- and either the trailing anchor line still matches, or the total line count matches the expected line count
-
-When a match is detected:
-
-- `<payload>.result.json` is written with status `completed`
-- the overlay namespace is cleared
-- active state for that buffer is removed
-
-### 2.6 User Controls
-
-Current buffer-local controls:
-
-- `<leader>m` clears the active overlay
-- `u` restores the most recently cleared overlay if none is active; otherwise it performs normal undo
-
-The buffer also attaches an `on_lines` callback to re-render after edits and an `on_detach` callback to clear stored overlay state.
-
-### 2.7 Error Handling
-
-Current failures are surfaced through `vim.notify()` with title `Codex Manual Apply`.
-
-Handled cases:
-
-- unreadable payload file
-- invalid JSON payload
-- missing required top-level fields
-- missing or empty `approval_id`
-- missing or empty target path
-- target file does not exist
-- result-file write failure
-
-Invalid or incomplete diff content is handled best-effort through parser fallback rather than a hard failure.
-
-## 3. Development Status
-
-### 3.1 What Changed From The Original Draft
-
-The original draft described inserting a visible comment block near the target line. The current implementation replaced that approach with extmark overlays and live buffer comparison.
-
-That change materially improved the workflow:
-
-- no filetype-aware comment logic is needed
-- the buffer stays editable in-place
-- the user sees match, mismatch, and deletion cues while typing
-- completion can be derived from actual buffer state
-
-### 3.2 Current Implementation Shape
-
-The implemented API surface is:
+Main entry points:
 
 ```lua
 require('custom.manual_apply').is_payload_path(path)
 require('custom.manual_apply').run(payload_path)
 require('custom.manual_apply').clear_current()
+require('custom.manual_apply').skip_current()
 require('custom.manual_apply').restore_current()
 ```
 
-The main execution path in [manual_apply.lua](/home/neepo/.config/nvim/lua/custom/manual_apply.lua#L374):
+Main implementation file:
 
-1. reject non-manual-apply paths
-2. decode and validate payload
-3. open `changes[1].path`
-4. parse the first diff hunk
-5. compute anchors and expected line count
-6. insert placeholder lines when needed
-7. attach overlay state and buffer callbacks
-8. move cursor to the target line
+[manual_apply.lua](/home/neepo/.config/nvim/lua/custom/manual_apply.lua)
 
-### 3.3 Known Limitations
+Autocmd wiring:
 
-- only the first change entry is processed
-- only the first hunk is used for placement/rendering
-- removed lines are indicated visually, but the module does not guide deletion character-by-character
-- clear currently writes `completed` instead of a distinct aborted/skipped status
-- placeholder blank lines modify the target buffer before the user finishes the edit
-- payload-path recognition is tied to the `/tmp/xcodex-manual-apply-*.json` naming convention
+[init.lua](/home/neepo/.config/nvim/init.lua#L1066)
 
-### 3.4 Validation Guidance
+## 6. Validation Checklist
 
-Useful manual checks for the current implementation:
+Manual checks for the rebuilt system:
 
-- open a valid payload and confirm the target file is opened instead of the payload
-- verify cursor placement for replace, insert, and pure-addition hunks
-- type the expected text and confirm pending/match/mismatch highlights update live
-- confirm deletion-only portions are marked with delete highlights
-- confirm completion writes `<payload>.result.json`
-- clear the overlay with `<leader>m` and restore it with `u`
-- verify invalid payloads and missing files surface notifications instead of crashing
-
-### 3.5 Next Logical Extensions
-
-- add distinct `cancelled` or `skipped` result statuses
-- support multiple hunks and multiple changes
-- improve deletion guidance for shrinking edits
-- provide explicit commands for accept/skip/reopen
-- make payload-path matching configurable if the CLI path convention changes
-
-## 4. Summary
-
-The implemented system is no longer a proposal for inserted suggestion comments. It is a working manual-apply overlay pipeline:
-
-- Codex hands Neovim a structured request file
-- Neovim opens the target file and overlays the expected final text
-- the user performs the edit directly in the real buffer
-- the module detects completion and writes a result file back for the originating approval
-
-The current design is minimal, fast, and already aligned with a precision-edit workflow, but it is intentionally scoped to single-change, first-hunk handling.
+- open a valid payload and confirm the target file replaces the payload buffer
+- verify multiple hunks render without placeholder line insertion
+- edit an early hunk and confirm later hunks stay attached to their own ranges
+- verify pending inserted lines appear as virtual lines instead of real blank lines
+- confirm `completed` is written only when all hunks match exactly
+- confirm `<leader>M` writes `dismissed`
+- confirm `<leader>m` hides the overlay and `u` restores it
+- confirm `[m` and `]m` navigate between hunks
+- confirm multi-file payloads and overlapping hunks fail clearly instead of being handled implicitly
