@@ -206,6 +206,14 @@ local function render_chunks(expected, actual)
   return chunks, mismatch_ranges
 end
 
+local function is_prefix_match(expected, actual)
+  if #actual > #expected then
+    return false
+  end
+
+  return expected:sub(1, #actual) == actual
+end
+
 local function summarize_hunk(hunk, current_lines)
   if lines_match(current_lines, hunk.new_lines) then
     return 'done', 'completed'
@@ -216,6 +224,25 @@ local function summarize_hunk(hunk, current_lines)
   end
 
   return 'pending', string.format('%d -> %d lines', #hunk.old_lines, #hunk.new_lines)
+end
+
+local function count_matching_prefix_lines(expected_lines, current_lines)
+  local count = 0
+  local limit = math.min(#expected_lines, #current_lines)
+
+  for i = 1, limit do
+    if is_prefix_match(expected_lines[i], current_lines[i]) then
+      count = count + 1
+    else
+      break
+    end
+  end
+
+  return count
+end
+
+local function is_deletion_heavy(hunk, current_lines)
+  return #current_lines > #hunk.new_lines
 end
 
 local function snapshot_state(buf, state)
@@ -337,6 +364,8 @@ render_overlay = function(buf)
     local current_lines, start_row = get_hunk_lines(buf, hunk)
     local status, detail = summarize_hunk(hunk, current_lines)
     local header_row = start_row or 0
+    local deletion_heavy = is_deletion_heavy(hunk, current_lines)
+    local prefix_match_lines = deletion_heavy and count_matching_prefix_lines(hunk.new_lines, current_lines) or 0
 
     vim.api.nvim_buf_set_extmark(buf, RENDER_NS, header_row, 0, {
       virt_lines = {
@@ -358,23 +387,39 @@ render_overlay = function(buf)
       local expected = hunk.new_lines[i]
 
       if actual ~= nil and expected ~= nil then
-        local chunks, mismatch_ranges = render_chunks(expected, actual)
-        if #chunks > 0 then
+        if actual == expected then
           vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, 0, {
-            virt_text = chunks,
-            virt_text_pos = 'overlay',
-            hl_mode = 'combine',
-            priority = 200,
-          })
-        end
-
-        for _, range in ipairs(mismatch_ranges) do
-          vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, range[1], {
             end_row = row,
-            end_col = range[2],
-            hl_group = 'CodexManualApplyMismatch',
-            priority = 201,
+            end_col = #actual,
+            hl_group = 'CodexManualApplyMatch',
+            priority = 199,
           })
+        elseif deletion_heavy and i <= prefix_match_lines then
+          vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, 0, {
+            end_row = row,
+            end_col = #actual,
+            hl_group = 'CodexManualApplyMatch',
+            priority = 199,
+          })
+        else
+          local chunks, mismatch_ranges = render_chunks(expected, actual)
+          if #chunks > 0 then
+            vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, 0, {
+              virt_text = chunks,
+              virt_text_pos = deletion_heavy and 'eol' or 'overlay',
+              hl_mode = 'combine',
+              priority = 200,
+            })
+          end
+
+          for _, range in ipairs(mismatch_ranges) do
+            vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, range[1], {
+              end_row = row,
+              end_col = range[2],
+              hl_group = 'CodexManualApplyMismatch',
+              priority = 201,
+            })
+          end
         end
       elseif actual ~= nil then
         vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, 0, {
@@ -400,6 +445,22 @@ render_overlay = function(buf)
         virt_lines = missing,
         priority = 190,
       })
+    elseif deletion_heavy then
+      local remaining_expected = {}
+      for i = prefix_match_lines + 1, #hunk.new_lines do
+        remaining_expected[#remaining_expected + 1] = {
+          { 'keep: ', 'CodexManualApplyHeader' },
+          { hunk.new_lines[i], 'CodexManualApplyPending' },
+        }
+      end
+
+      if #remaining_expected > 0 then
+        vim.api.nvim_buf_set_extmark(buf, RENDER_NS, start_row + prefix_match_lines, 0, {
+          virt_lines = remaining_expected,
+          virt_lines_above = true,
+          priority = 190,
+        })
+      end
     end
 
     if not lines_match(current_lines, hunk.new_lines) then
