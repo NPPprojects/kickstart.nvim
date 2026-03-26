@@ -230,6 +230,14 @@ local function lines_match(actual, expected)
   return true
 end
 
+local function is_prefix_match(expected, actual)
+  if #actual > #expected then
+    return false
+  end
+
+  return expected:sub(1, #actual) == actual
+end
+
 local function render_chunks(expected, actual)
   local chunks = {}
   local mismatch_ranges = {}
@@ -265,28 +273,6 @@ local function render_chunks(expected, actual)
   return chunks, mismatch_ranges
 end
 
-local function is_prefix_match(expected, actual)
-  if #actual > #expected then
-    return false
-  end
-
-  return expected:sub(1, #actual) == actual
-end
-
-local function summarize_hunk(hunk, current_lines)
-  local analysis = ensure_hunk_analysis(hunk)
-
-  if lines_match(current_lines, analysis.tracked_new_lines) then
-    return 'done', 'completed'
-  end
-
-  if #current_lines == 0 and #analysis.tracked_new_lines > 0 then
-    return 'pending', 'insert'
-  end
-
-  return 'pending', string.format('%d -> %d lines', #analysis.tracked_old_lines, #analysis.tracked_new_lines)
-end
-
 local function count_matching_prefix_lines(expected_lines, current_lines)
   local count = 0
   local limit = math.min(#expected_lines, #current_lines)
@@ -302,8 +288,48 @@ local function count_matching_prefix_lines(expected_lines, current_lines)
   return count
 end
 
-local function is_deletion_heavy(expected_lines, current_lines)
-  return #current_lines > #expected_lines
+local function summarize_hunk(hunk_state, current_lines)
+  local analysis = ensure_hunk_analysis(hunk_state.hunk)
+  local old_count = #analysis.tracked_old_lines
+  local new_count = #analysis.tracked_new_lines
+  local current_count = #current_lines
+
+  if lines_match(current_lines, analysis.tracked_new_lines) then
+    hunk_state.insert_started = false
+    return 'done', 'completed', 'done'
+  end
+
+  if old_count > 0 and new_count == 0 then
+    return 'pending', string.format('delete %d line(s)', current_count), 'delete'
+  end
+
+  if old_count == 0 and new_count > 0 then
+    if current_count == 0 then
+      return 'pending', string.format('insert %d line(s)', new_count), 'insert'
+    end
+
+    return 'pending', string.format('insert %d more line(s)', math.max(new_count - current_count, 0)), 'insert'
+  end
+
+  if current_count == 0 then
+    hunk_state.insert_started = true
+    return 'pending', string.format('insert %d line(s)', new_count), 'insert'
+  end
+
+  if hunk_state.insert_started and lines_match(current_lines, analysis.tracked_old_lines) then
+    hunk_state.insert_started = false
+  end
+
+  if hunk_state.insert_started then
+    return 'pending', string.format('insert %d more line(s)', math.max(new_count - current_count, 0)), 'insert'
+  end
+
+  if count_matching_prefix_lines(analysis.tracked_new_lines, current_lines) == current_count then
+    hunk_state.insert_started = true
+    return 'pending', string.format('insert %d more line(s)', new_count - current_count), 'insert'
+  end
+
+  return 'pending', string.format('delete %d line(s), then insert %d', current_count, new_count), 'delete'
 end
 
 local function snapshot_state(buf, state)
@@ -323,6 +349,7 @@ local function snapshot_state(buf, state)
         start_row = start_row,
         end_row = end_row,
         hunk = vim.deepcopy(hunk.hunk),
+        insert_started = hunk.insert_started,
       }
     end
   end
@@ -341,7 +368,7 @@ local function clear_overlay(buf, opts)
   local state = ACTIVE[buf]
 
   if state then
-    if opts.write_status or state.result_written then
+    if opts.write_status or state.result_written or opts.discard_snapshot then
       LAST_CLEARED[buf] = nil
     else
       LAST_CLEARED[buf] = snapshot_state(buf, state)
@@ -375,6 +402,7 @@ local function create_hunk(buf, spec)
     hunk = spec.hunk,
     start_mark = start_mark,
     end_mark = end_mark,
+    insert_started = spec.insert_started or false,
   }
 end
 
@@ -405,6 +433,54 @@ local function jump_to_hunk(buf, direction)
 
   vim.api.nvim_win_set_cursor(0, { candidate + 1, 0 })
   return true
+end
+
+local function materialize_next_guided_line(buf)
+  local state = ACTIVE[buf]
+  if not state then
+    return false
+  end
+
+  local cursor_row = vim.api.nvim_win_get_cursor(0)[1] - 1
+  local best_insert_row
+  local best_distance
+
+  for _, hunk in ipairs(state.hunks) do
+    local current_lines, start_row = get_hunk_lines(buf, hunk)
+    local _, _, phase = summarize_hunk(hunk, current_lines)
+    if phase == 'insert' then
+      local insert_row = start_row + #current_lines
+      local distance = math.abs(insert_row - cursor_row)
+      if best_distance == nil or distance < best_distance then
+        best_insert_row = insert_row
+        best_distance = distance
+      end
+    end
+  end
+
+  if best_insert_row == nil then
+    return false
+  end
+
+  vim.api.nvim_buf_set_lines(buf, best_insert_row, best_insert_row, false, { '' })
+  vim.api.nvim_win_set_cursor(0, { best_insert_row + 1, 0 })
+  vim.cmd.startinsert()
+  return true
+end
+
+local function manual_apply_tab()
+  local width = vim.bo.softtabstop
+  if width == nil or width <= 0 then
+    width = vim.bo.shiftwidth
+  end
+  if width == nil or width <= 0 then
+    width = vim.bo.tabstop
+  end
+  if width == nil or width <= 0 then
+    width = 2
+  end
+
+  return string.rep(' ', width)
 end
 
 local function find_sequence_matches(lines, needle, min_row)
@@ -555,10 +631,8 @@ render_overlay = function(buf)
   for _, hunk in ipairs(state.hunks) do
     local analysis = ensure_hunk_analysis(hunk.hunk)
     local current_lines, start_row = get_hunk_lines(buf, hunk)
-    local status, detail = summarize_hunk(hunk.hunk, current_lines)
+    local status, detail, phase = summarize_hunk(hunk, current_lines)
     local header_row = start_row or 0
-    local deletion_heavy = is_deletion_heavy(analysis.tracked_new_lines, current_lines)
-    local prefix_match_lines = deletion_heavy and count_matching_prefix_lines(analysis.tracked_new_lines, current_lines) or 0
 
     vim.api.nvim_buf_set_extmark(buf, RENDER_NS, header_row, 0, {
       virt_lines = {
@@ -573,48 +647,18 @@ render_overlay = function(buf)
       priority = 180,
     })
 
-    local display_len = math.max(#current_lines, #analysis.tracked_new_lines)
-    for i = 1, display_len do
+    for i = 1, #current_lines do
       local row = start_row + i - 1
       local actual = current_lines[i]
-      local expected = analysis.tracked_new_lines[i]
 
-      if actual ~= nil and expected ~= nil then
-        if actual == expected then
-          vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, 0, {
-            end_row = row,
-            end_col = #actual,
-            hl_group = 'CodexManualApplyMatch',
-            priority = 199,
-          })
-        elseif deletion_heavy and i <= prefix_match_lines then
-          vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, 0, {
-            end_row = row,
-            end_col = #actual,
-            hl_group = 'CodexManualApplyMatch',
-            priority = 199,
-          })
-        else
-          local chunks, mismatch_ranges = render_chunks(expected, actual)
-          if #chunks > 0 then
-            vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, 0, {
-              virt_text = chunks,
-              virt_text_pos = deletion_heavy and 'eol' or 'overlay',
-              hl_mode = 'combine',
-              priority = 200,
-            })
-          end
-
-          for _, range in ipairs(mismatch_ranges) do
-            vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, range[1], {
-              end_row = row,
-              end_col = range[2],
-              hl_group = 'CodexManualApplyMismatch',
-              priority = 201,
-            })
-          end
-        end
-      elseif actual ~= nil then
+      if phase == 'done' then
+        vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, 0, {
+          end_row = row,
+          end_col = #actual,
+          hl_group = 'CodexManualApplyMatch',
+          priority = 199,
+        })
+      elseif phase == 'delete' then
         vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, 0, {
           end_row = row,
           end_col = #actual,
@@ -626,10 +670,45 @@ render_overlay = function(buf)
           virt_text_pos = 'eol',
           priority = 201,
         })
+      elseif phase == 'insert' and i <= #analysis.tracked_new_lines and actual == analysis.tracked_new_lines[i] then
+        vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, 0, {
+          end_row = row,
+          end_col = #actual,
+          hl_group = 'CodexManualApplyMatch',
+          priority = 199,
+        })
+      elseif phase == 'insert' and i <= #analysis.tracked_new_lines then
+        local expected = analysis.tracked_new_lines[i]
+        local chunks, mismatch_ranges = render_chunks(expected, actual)
+
+        if #chunks > 0 then
+          vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, 0, {
+            virt_text = chunks,
+            virt_text_pos = 'overlay',
+            hl_mode = 'combine',
+            priority = 200,
+          })
+        end
+
+        for _, range in ipairs(mismatch_ranges) do
+          vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, range[1], {
+            end_row = row,
+            end_col = range[2],
+            hl_group = 'CodexManualApplyMismatch',
+            priority = 201,
+          })
+        end
+      else
+        vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, 0, {
+          end_row = row,
+          end_col = #actual,
+          hl_group = 'CodexManualApplyMismatch',
+          priority = 200,
+        })
       end
     end
 
-    if #current_lines < #analysis.tracked_new_lines then
+    if phase == 'insert' and #current_lines < #analysis.tracked_new_lines then
       local missing = {}
       for i = #current_lines + 1, #analysis.tracked_new_lines do
         missing[#missing + 1] = { { analysis.tracked_new_lines[i], 'CodexManualApplyPending' } }
@@ -638,22 +717,6 @@ render_overlay = function(buf)
         virt_lines = missing,
         priority = 190,
       })
-    elseif deletion_heavy then
-      local remaining_expected = {}
-      for i = prefix_match_lines + 1, #analysis.tracked_new_lines do
-        remaining_expected[#remaining_expected + 1] = {
-          { 'keep: ', 'CodexManualApplyHeader' },
-          { analysis.tracked_new_lines[i], 'CodexManualApplyPending' },
-        }
-      end
-
-      if #remaining_expected > 0 then
-        vim.api.nvim_buf_set_extmark(buf, RENDER_NS, start_row + prefix_match_lines, 0, {
-          virt_lines = remaining_expected,
-          virt_lines_above = true,
-          priority = 190,
-        })
-      end
     end
 
     if not lines_match(current_lines, analysis.tracked_new_lines) then
@@ -664,7 +727,7 @@ render_overlay = function(buf)
   if completed and not state.result_written then
     if write_result(state.payload_path, state.approval_id, 'completed') then
       state.result_written = true
-      clear_overlay(buf)
+      clear_overlay(buf, { discard_snapshot = true })
     end
   end
 end
@@ -712,6 +775,25 @@ local function attach_buffer(buf)
     desc = 'Undo or restore Codex manual apply overlay',
   })
 
+  vim.keymap.set('n', '<leader>i', function()
+    if materialize_next_guided_line(buf) then
+      return
+    end
+
+    notify('No pending guided insert line in this buffer', vim.log.levels.WARN)
+  end, {
+    buffer = buf,
+    silent = true,
+    desc = 'Materialize next guided insert line',
+  })
+
+  vim.keymap.set('i', '<Tab>', manual_apply_tab, {
+    buffer = buf,
+    expr = true,
+    silent = true,
+    desc = 'Insert indentation spaces during Codex manual apply',
+  })
+
   vim.api.nvim_buf_attach(buf, false, {
     on_lines = function(_, changed_buf)
       vim.schedule(function()
@@ -754,6 +836,15 @@ local function build_session_specs(buf, hunks)
   return specs
 end
 
+local function sort_hunks(hunks)
+  table.sort(hunks, function(a, b)
+    if a.old_start == b.old_start then
+      return a.old_count < b.old_count
+    end
+    return a.old_start < b.old_start
+  end)
+end
+
 function M.clear_current()
   local buf = vim.api.nvim_get_current_buf()
   local state = ACTIVE[buf]
@@ -765,7 +856,8 @@ function M.clear_current()
 end
 
 function M.skip_current()
-  clear_overlay(vim.api.nvim_get_current_buf(), { write_status = 'dismissed' })
+  local buf = vim.api.nvim_get_current_buf()
+  clear_overlay(buf, { write_status = 'dismissed', discard_snapshot = true })
 end
 
 function M.restore_current()
@@ -835,29 +927,26 @@ function M.run(payload_path)
 
   local all_hunks = {}
   for _, change in ipairs(data.changes) do
-    if type(change) ~= 'table' or change.path ~= target_path then
-      notify('Manual apply payload must target exactly one file', vim.log.levels.ERROR)
+    if type(change) ~= 'table' then
+      notify('Payload change must be a table', vim.log.levels.ERROR)
       return false
     end
 
-    local diff = type(change.diff) == 'string' and change.diff or ''
-    local parsed_hunks, parse_err = parse_diff(diff)
-    if not parsed_hunks then
-      notify(parse_err, vim.log.levels.ERROR)
-      return false
-    end
+    if change.path == target_path then
+      local diff = type(change.diff) == 'string' and change.diff or ''
+      local parsed_hunks, parse_err = parse_diff(diff)
+      if not parsed_hunks then
+        notify(parse_err, vim.log.levels.ERROR)
+        return false
+      end
 
-    for _, hunk in ipairs(parsed_hunks) do
-      all_hunks[#all_hunks + 1] = hunk
+      for _, hunk in ipairs(parsed_hunks) do
+        all_hunks[#all_hunks + 1] = hunk
+      end
     end
   end
 
-  table.sort(all_hunks, function(a, b)
-    if a.old_start == b.old_start then
-      return a.old_count < b.old_count
-    end
-    return a.old_start < b.old_start
-  end)
+  sort_hunks(all_hunks)
 
   if vim.fn.filereadable(target_path) ~= 1 then
     notify('Target file does not exist: ' .. target_path, vim.log.levels.ERROR)
@@ -873,7 +962,7 @@ function M.run(payload_path)
     return false
   end
 
-  clear_overlay(buf)
+  clear_overlay(buf, { discard_snapshot = true })
 
   local state = {
     payload_path = payload_path,
