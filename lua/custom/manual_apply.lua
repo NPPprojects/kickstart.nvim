@@ -681,31 +681,7 @@ local function attach_buffer(buf)
   end, {
     buffer = buf,
     silent = true,
-    desc = 'Hide Codex manual apply overlay',
-  })
-
-  vim.keymap.set('n', '<leader>M', function()
-    M.skip_current()
-  end, {
-    buffer = buf,
-    silent = true,
-    desc = 'Skip Codex manual apply request',
-  })
-
-  vim.keymap.set('n', ']m', function()
-    jump_to_hunk(buf, 1)
-  end, {
-    buffer = buf,
-    silent = true,
-    desc = 'Next Codex manual apply hunk',
-  })
-
-  vim.keymap.set('n', '[m', function()
-    jump_to_hunk(buf, -1)
-  end, {
-    buffer = buf,
-    silent = true,
-    desc = 'Previous Codex manual apply hunk',
+    desc = 'Complete Codex manual apply session',
   })
 
   vim.keymap.set('n', '<leader>.', function()
@@ -779,7 +755,13 @@ local function build_session_specs(buf, hunks)
 end
 
 function M.clear_current()
-  clear_overlay(vim.api.nvim_get_current_buf())
+  local buf = vim.api.nvim_get_current_buf()
+  local state = ACTIVE[buf]
+  if not state then
+    return
+  end
+
+  clear_overlay(buf, { write_status = 'completed' })
 end
 
 function M.skip_current()
