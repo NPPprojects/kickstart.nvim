@@ -66,29 +66,27 @@ local function parse_diff(diff)
         old_count = parse_hunk_count(old_count),
         new_start = tonumber(new_start) or 1,
         new_count = parse_hunk_count(new_count),
-        old_lines = {},
-        new_lines = {},
+        lines = {},
       }
 
       i = i + 1
       while i <= #lines and not vim.startswith(lines[i], '@@ ') do
         local body_line = lines[i]
         if body_line == '' then
-          -- Trailing newline after the final diff line.
+          -- Ignore trailing newline after the final diff line.
         elseif vim.startswith(body_line, ' ') then
-          table.insert(hunk.old_lines, body_line:sub(2))
-          table.insert(hunk.new_lines, body_line:sub(2))
+          hunk.lines[#hunk.lines + 1] = { kind = 'context', text = body_line:sub(2) }
         elseif vim.startswith(body_line, '-') and not vim.startswith(body_line, '---') then
-          table.insert(hunk.old_lines, body_line:sub(2))
+          hunk.lines[#hunk.lines + 1] = { kind = 'delete', text = body_line:sub(2) }
         elseif vim.startswith(body_line, '+') and not vim.startswith(body_line, '+++') then
-          table.insert(hunk.new_lines, body_line:sub(2))
+          hunk.lines[#hunk.lines + 1] = { kind = 'add', text = body_line:sub(2) }
         elseif body_line ~= '\\ No newline at end of file' then
           return nil, 'Unsupported diff line in hunk: ' .. body_line
         end
         i = i + 1
       end
 
-      table.insert(hunks, hunk)
+      hunks[#hunks + 1] = hunk
     else
       i = i + 1
     end
@@ -99,6 +97,67 @@ local function parse_diff(diff)
   end
 
   return hunks
+end
+
+local function ensure_hunk_analysis(hunk)
+  if hunk.analysis then
+    return hunk.analysis
+  end
+
+  local old_lines = {}
+  local new_lines = {}
+  local prefix_context = 0
+  local suffix_context = 0
+
+  for _, entry in ipairs(hunk.lines) do
+    if entry.kind ~= 'add' then
+      old_lines[#old_lines + 1] = entry.text
+    end
+    if entry.kind ~= 'delete' then
+      new_lines[#new_lines + 1] = entry.text
+    end
+  end
+
+  for _, entry in ipairs(hunk.lines) do
+    if entry.kind ~= 'context' then
+      break
+    end
+    prefix_context = prefix_context + 1
+  end
+
+  for idx = #hunk.lines, 1, -1 do
+    if hunk.lines[idx].kind ~= 'context' then
+      break
+    end
+    suffix_context = suffix_context + 1
+  end
+
+  local tracked_old_start = prefix_context + 1
+  local tracked_old_end = #old_lines - suffix_context
+  local tracked_new_start = prefix_context + 1
+  local tracked_new_end = #new_lines - suffix_context
+  local tracked_old_lines = {}
+  local tracked_new_lines = {}
+
+  if tracked_old_start <= tracked_old_end then
+    tracked_old_lines = vim.list_slice(old_lines, tracked_old_start, tracked_old_end)
+  end
+
+  if tracked_new_start <= tracked_new_end then
+    tracked_new_lines = vim.list_slice(new_lines, tracked_new_start, tracked_new_end)
+  end
+
+  hunk.analysis = {
+    old_lines = old_lines,
+    new_lines = new_lines,
+    prefix_context = prefix_context,
+    suffix_context = suffix_context,
+    tracked_old_lines = tracked_old_lines,
+    tracked_new_lines = tracked_new_lines,
+    hint_row = math.max(hunk.old_start - 1 + prefix_context, 0),
+  }
+
+  return hunk.analysis
 end
 
 local function result_path_for_payload(payload_path)
@@ -215,15 +274,17 @@ local function is_prefix_match(expected, actual)
 end
 
 local function summarize_hunk(hunk, current_lines)
-  if lines_match(current_lines, hunk.new_lines) then
+  local analysis = ensure_hunk_analysis(hunk)
+
+  if lines_match(current_lines, analysis.tracked_new_lines) then
     return 'done', 'completed'
   end
 
-  if #current_lines == 0 and #hunk.new_lines > 0 then
+  if #current_lines == 0 and #analysis.tracked_new_lines > 0 then
     return 'pending', 'insert'
   end
 
-  return 'pending', string.format('%d -> %d lines', #hunk.old_lines, #hunk.new_lines)
+  return 'pending', string.format('%d -> %d lines', #analysis.tracked_old_lines, #analysis.tracked_new_lines)
 end
 
 local function count_matching_prefix_lines(expected_lines, current_lines)
@@ -241,8 +302,8 @@ local function count_matching_prefix_lines(expected_lines, current_lines)
   return count
 end
 
-local function is_deletion_heavy(hunk, current_lines)
-  return #current_lines > #hunk.new_lines
+local function is_deletion_heavy(expected_lines, current_lines)
+  return #current_lines > #expected_lines
 end
 
 local function snapshot_state(buf, state)
@@ -261,8 +322,7 @@ local function snapshot_state(buf, state)
         index = hunk.index,
         start_row = start_row,
         end_row = end_row,
-        old_lines = vim.deepcopy(hunk.old_lines),
-        new_lines = vim.deepcopy(hunk.new_lines),
+        hunk = vim.deepcopy(hunk.hunk),
       }
     end
   end
@@ -293,11 +353,9 @@ local function clear_overlay(buf, opts)
     vim.api.nvim_buf_clear_namespace(buf, ANCHOR_NS, 0, -1)
   end
 
-  if state then
-    if opts.write_status and state.payload_path and state.approval_id and not state.result_written then
-      if write_result(state.payload_path, state.approval_id, opts.write_status) then
-        state.result_written = true
-      end
+  if state and opts.write_status and state.payload_path and state.approval_id and not state.result_written then
+    if write_result(state.payload_path, state.approval_id, opts.write_status) then
+      state.result_written = true
     end
   end
 
@@ -314,8 +372,7 @@ local function create_hunk(buf, spec)
 
   return {
     index = spec.index,
-    old_lines = spec.old_lines,
-    new_lines = spec.new_lines,
+    hunk = spec.hunk,
     start_mark = start_mark,
     end_mark = end_mark,
   }
@@ -350,6 +407,141 @@ local function jump_to_hunk(buf, direction)
   return true
 end
 
+local function find_sequence_matches(lines, needle, min_row)
+  local matches = {}
+  min_row = min_row or 0
+
+  if #needle == 0 then
+    return matches
+  end
+
+  local last_start = #lines - #needle
+  for row = math.max(min_row, 0), last_start do
+    local ok = true
+    for offset = 1, #needle do
+      if lines[row + offset] ~= needle[offset] then
+        ok = false
+        break
+      end
+    end
+    if ok then
+      matches[#matches + 1] = row
+    end
+  end
+
+  return matches
+end
+
+local function choose_best_exact_match(lines, hunk, min_row)
+  local analysis = ensure_hunk_analysis(hunk)
+  if #analysis.old_lines == 0 then
+    return nil
+  end
+
+  local matches = find_sequence_matches(lines, analysis.old_lines, min_row - analysis.prefix_context)
+  local best_row
+  local best_score
+
+  for _, row in ipairs(matches) do
+    local tracked_start = row + analysis.prefix_context
+    if tracked_start >= min_row then
+      local score = math.abs(tracked_start - analysis.hint_row)
+      if best_score == nil or score < best_score then
+        best_row = row
+        best_score = score
+      end
+    end
+  end
+
+  if best_row == nil then
+    return nil
+  end
+
+  local start_row = best_row + analysis.prefix_context
+  return {
+    start_row = start_row,
+    end_row = start_row + #analysis.tracked_old_lines,
+  }
+end
+
+local function choose_context_anchored_range(lines, hunk, min_row)
+  local analysis = ensure_hunk_analysis(hunk)
+  local line_count = #lines
+  local tracked_old_len = #analysis.tracked_old_lines
+  local prefix = vim.list_slice(analysis.old_lines, 1, analysis.prefix_context)
+  local suffix = {}
+
+  if analysis.suffix_context > 0 then
+    suffix = vim.list_slice(analysis.old_lines, #analysis.old_lines - analysis.suffix_context + 1, #analysis.old_lines)
+  end
+
+  local prefix_matches = #prefix > 0 and find_sequence_matches(lines, prefix, min_row - #prefix) or {}
+  local suffix_matches = #suffix > 0 and find_sequence_matches(lines, suffix, min_row) or {}
+  local best
+  local best_score
+
+  if #prefix_matches > 0 and #suffix_matches > 0 then
+    local suffix_idx = 1
+
+    for _, prefix_row in ipairs(prefix_matches) do
+      local core_start = prefix_row + #prefix
+      while suffix_idx <= #suffix_matches and suffix_matches[suffix_idx] < core_start do
+        suffix_idx = suffix_idx + 1
+      end
+
+      local suffix_row = suffix_matches[suffix_idx]
+      if suffix_row then
+        local core_end = suffix_row
+        if core_start >= min_row and core_end >= core_start then
+          local score = math.abs(core_start - analysis.hint_row) + math.abs((core_end - core_start) - tracked_old_len)
+          if best_score == nil or score < best_score then
+            best = { start_row = core_start, end_row = core_end }
+            best_score = score
+          end
+        end
+      end
+    end
+  elseif #prefix_matches > 0 then
+    for _, prefix_row in ipairs(prefix_matches) do
+      local start_row = prefix_row + #prefix
+      if start_row >= min_row then
+        local end_row = math.min(start_row + tracked_old_len, line_count)
+        local score = math.abs(start_row - analysis.hint_row)
+        if best_score == nil or score < best_score then
+          best = { start_row = start_row, end_row = end_row }
+          best_score = score
+        end
+      end
+    end
+  elseif #suffix_matches > 0 then
+    for _, suffix_row in ipairs(suffix_matches) do
+      local start_row = math.max(suffix_row - tracked_old_len, min_row)
+      local end_row = suffix_row
+      if end_row >= start_row then
+        local score = math.abs(start_row - analysis.hint_row)
+        if best_score == nil or score < best_score then
+          best = { start_row = start_row, end_row = end_row }
+          best_score = score
+        end
+      end
+    end
+  end
+
+  if best then
+    return best
+  end
+
+  local start_row = math.max(math.min(analysis.hint_row, line_count), min_row)
+  return {
+    start_row = start_row,
+    end_row = math.min(start_row + tracked_old_len, line_count),
+  }
+end
+
+local function locate_hunk_range(lines, hunk, min_row)
+  return choose_best_exact_match(lines, hunk, min_row) or choose_context_anchored_range(lines, hunk, min_row)
+end
+
 render_overlay = function(buf)
   local state = ACTIVE[buf]
   if not state or not vim.api.nvim_buf_is_valid(buf) then
@@ -361,11 +553,12 @@ render_overlay = function(buf)
   local completed = true
 
   for _, hunk in ipairs(state.hunks) do
+    local analysis = ensure_hunk_analysis(hunk.hunk)
     local current_lines, start_row = get_hunk_lines(buf, hunk)
-    local status, detail = summarize_hunk(hunk, current_lines)
+    local status, detail = summarize_hunk(hunk.hunk, current_lines)
     local header_row = start_row or 0
-    local deletion_heavy = is_deletion_heavy(hunk, current_lines)
-    local prefix_match_lines = deletion_heavy and count_matching_prefix_lines(hunk.new_lines, current_lines) or 0
+    local deletion_heavy = is_deletion_heavy(analysis.tracked_new_lines, current_lines)
+    local prefix_match_lines = deletion_heavy and count_matching_prefix_lines(analysis.tracked_new_lines, current_lines) or 0
 
     vim.api.nvim_buf_set_extmark(buf, RENDER_NS, header_row, 0, {
       virt_lines = {
@@ -380,11 +573,11 @@ render_overlay = function(buf)
       priority = 180,
     })
 
-    local display_len = math.max(#current_lines, #hunk.new_lines)
+    local display_len = math.max(#current_lines, #analysis.tracked_new_lines)
     for i = 1, display_len do
       local row = start_row + i - 1
       local actual = current_lines[i]
-      local expected = hunk.new_lines[i]
+      local expected = analysis.tracked_new_lines[i]
 
       if actual ~= nil and expected ~= nil then
         if actual == expected then
@@ -436,10 +629,10 @@ render_overlay = function(buf)
       end
     end
 
-    if #current_lines < #hunk.new_lines then
+    if #current_lines < #analysis.tracked_new_lines then
       local missing = {}
-      for i = #current_lines + 1, #hunk.new_lines do
-        missing[#missing + 1] = { { hunk.new_lines[i], 'CodexManualApplyPending' } }
+      for i = #current_lines + 1, #analysis.tracked_new_lines do
+        missing[#missing + 1] = { { analysis.tracked_new_lines[i], 'CodexManualApplyPending' } }
       end
       vim.api.nvim_buf_set_extmark(buf, RENDER_NS, start_row + #current_lines, 0, {
         virt_lines = missing,
@@ -447,10 +640,10 @@ render_overlay = function(buf)
       })
     elseif deletion_heavy then
       local remaining_expected = {}
-      for i = prefix_match_lines + 1, #hunk.new_lines do
+      for i = prefix_match_lines + 1, #analysis.tracked_new_lines do
         remaining_expected[#remaining_expected + 1] = {
           { 'keep: ', 'CodexManualApplyHeader' },
-          { hunk.new_lines[i], 'CodexManualApplyPending' },
+          { analysis.tracked_new_lines[i], 'CodexManualApplyPending' },
         }
       end
 
@@ -463,7 +656,7 @@ render_overlay = function(buf)
       end
     end
 
-    if not lines_match(current_lines, hunk.new_lines) then
+    if not lines_match(current_lines, analysis.tracked_new_lines) then
       completed = false
     end
   end
@@ -515,6 +708,22 @@ local function attach_buffer(buf)
     desc = 'Previous Codex manual apply hunk',
   })
 
+  vim.keymap.set('n', '<leader>.', function()
+    jump_to_hunk(buf, 1)
+  end, {
+    buffer = buf,
+    silent = true,
+    desc = 'Next Codex manual apply hunk',
+  })
+
+  vim.keymap.set('n', '<leader>,', function()
+    jump_to_hunk(buf, -1)
+  end, {
+    buffer = buf,
+    silent = true,
+    desc = 'Previous Codex manual apply hunk',
+  })
+
   vim.keymap.set('n', 'u', function()
     if not ACTIVE[buf] and M.restore_current() then
       return
@@ -542,26 +751,28 @@ end
 
 local function build_session_specs(buf, hunks)
   local specs = {}
-  local line_count = vim.api.nvim_buf_line_count(buf)
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local min_row = 0
 
   for index, hunk in ipairs(hunks) do
-    local start_row = math.max(math.min(hunk.old_start - 1, line_count), 0)
-    local end_row = math.max(math.min(start_row + hunk.old_count, line_count), start_row)
-
-    if #specs > 0 then
-      local prev = specs[#specs]
-      if start_row < prev.end_row then
-        return nil, 'Overlapping hunks are not supported'
-      end
+    local analysis = ensure_hunk_analysis(hunk)
+    local range = locate_hunk_range(lines, hunk, min_row)
+    if range.start_row < min_row then
+      return nil, 'Overlapping hunks are not supported'
     end
 
     specs[#specs + 1] = {
       index = index,
-      start_row = start_row,
-      end_row = end_row,
-      old_lines = hunk.old_lines,
-      new_lines = hunk.new_lines,
+      start_row = range.start_row,
+      end_row = range.end_row,
+      hunk = hunk,
     }
+
+    min_row = math.max(range.end_row, range.start_row)
+
+    if #analysis.old_lines == 0 and #analysis.tracked_old_lines == 0 then
+      min_row = range.start_row
+    end
   end
 
   return specs

@@ -14,10 +14,12 @@ That model works for a single local edit and short replace hunks. It falls apart
 
 The rebuilt system is hunk-centric instead of buffer-geometry-centric:
 
+- each hunk is parsed as unified-diff lines: context, deletions, additions
 - each hunk gets its own tracked range in the target buffer
 - range boundaries are extmarks, so they move with user edits
+- initial placement prefers matching the old-side hunk content and falls back to surrounding context; line numbers are only hints
 - no placeholder lines are inserted into the file
-- completion is evaluated per hunk against the live text inside that hunk range
+- completion is evaluated per hunk against the live text inside the tracked change span
 
 ## 2. Old System Review
 
@@ -141,8 +143,10 @@ Codex CLI
 -> payload is decoded and validated
 -> all hunks for the single target file are parsed and sorted
 -> target file is opened
--> each hunk gets start/end extmark anchors in the real buffer
--> renderer compares the live text inside each anchored range to the expected new lines
+-> each hunk is interpreted as an old-side sequence, a new-side sequence, and outer context anchors
+-> initial hunk placement searches the buffer for old content or shared context instead of trusting `@@` coordinates
+-> each tracked change span gets start/end extmark anchors in the real buffer
+-> renderer compares the live text inside each tracked span to the expected new-side span
 -> overlays show progress without inserting placeholder content
 -> when all hunks match, result file is written and the overlay is cleared
 ```
@@ -169,7 +173,7 @@ The rebuild fixes the core multi-hunk instability, but it is still intentionally
 
 - single-file only
 - line-oriented only; no character-precise patch semantics across line boundaries
-- no fuzzy search if the file no longer resembles the diff context
+- initial placement is context-guided, but it is not a full `patch(1)` implementation
 - overlapping hunks are rejected
 - restore recreates anchors from the last hidden positions; it is not a durable session store
 
