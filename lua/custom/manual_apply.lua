@@ -192,6 +192,19 @@ local function get_mark_row(buf, mark_id)
   return pos[1]
 end
 
+local function set_cursor_row_clamped(win, buf, row, col)
+  if not vim.api.nvim_win_is_valid(win) or not vim.api.nvim_buf_is_valid(buf) then
+    return false
+  end
+
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  local target_row = math.max(1, math.min((row or 0) + 1, math.max(line_count, 1)))
+  local target_col = math.max(col or 0, 0)
+
+  vim.api.nvim_win_set_cursor(win, { target_row, target_col })
+  return true
+end
+
 local function get_hunk_rows(buf, hunk)
   local start_row = get_mark_row(buf, hunk.start_mark)
   local end_row = get_mark_row(buf, hunk.end_mark)
@@ -431,8 +444,7 @@ local function jump_to_hunk(buf, direction)
     candidate = get_mark_row(buf, edge.start_mark) or 0
   end
 
-  vim.api.nvim_win_set_cursor(0, { candidate + 1, 0 })
-  return true
+  return set_cursor_row_clamped(0, buf, candidate, 0)
 end
 
 local function materialize_next_guided_line(buf)
@@ -463,7 +475,7 @@ local function materialize_next_guided_line(buf)
   end
 
   vim.api.nvim_buf_set_lines(buf, best_insert_row, best_insert_row, false, { '' })
-  vim.api.nvim_win_set_cursor(0, { best_insert_row + 1, 0 })
+  set_cursor_row_clamped(0, buf, best_insert_row, 0)
   vim.cmd.startinsert()
   return true
 end
@@ -982,7 +994,7 @@ function M.run(payload_path)
   render_overlay(buf)
 
   local first_row = get_mark_row(buf, state.hunks[1].start_mark) or 0
-  vim.api.nvim_win_set_cursor(0, { first_row + 1, 0 })
+  set_cursor_row_clamped(0, buf, first_row, 0)
   notify(string.format('Tracking %d manual apply hunk(s)', #state.hunks))
 
   return true
