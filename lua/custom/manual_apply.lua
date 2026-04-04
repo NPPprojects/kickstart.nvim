@@ -99,6 +99,37 @@ local function parse_diff(diff)
   return hunks
 end
 
+local function synthesize_add_hunks(diff)
+  local lines = split_lines(diff)
+  local hunk = {
+    old_start = 1,
+    old_count = 0,
+    new_start = 1,
+    new_count = #lines,
+    lines = {},
+  }
+
+  for _, line in ipairs(lines) do
+    hunk.lines[#hunk.lines + 1] = { kind = 'add', text = line }
+  end
+
+  return { hunk }
+end
+
+local function parse_change_hunks(change)
+  local diff = type(change.diff) == 'string' and change.diff or ''
+  local parsed_hunks, parse_err = parse_diff(diff)
+  if parsed_hunks then
+    return parsed_hunks
+  end
+
+  if change.kind == 'add' then
+    return synthesize_add_hunks(diff)
+  end
+
+  return nil, parse_err
+end
+
 local function ensure_hunk_analysis(hunk)
   if hunk.analysis then
     return hunk.analysis
@@ -229,13 +260,39 @@ local function get_hunk_lines(buf, hunk)
   return vim.api.nvim_buf_get_lines(buf, start_row, end_row, false), start_row, end_row
 end
 
-local function lines_match(actual, expected)
+local function normalize_approved_rows(rows)
+  local normalized = {}
+
+  for _, row in ipairs(rows or {}) do
+    if type(row) == 'number' and row >= 1 then
+      normalized[#normalized + 1] = math.floor(row)
+    end
+  end
+
+  table.sort(normalized)
+  return normalized
+end
+
+local function get_approved_relative_rows(buf, hunk, start_row)
+  local approved = {}
+
+  for _, mark_id in ipairs(hunk.approved_line_marks or {}) do
+    local row = get_mark_row(buf, mark_id)
+    if row ~= nil and row >= start_row then
+      approved[row - start_row + 1] = true
+    end
+  end
+
+  return approved
+end
+
+local function lines_match(actual, expected, approved_rows)
   if #actual ~= #expected then
     return false
   end
 
   for i = 1, #expected do
-    if actual[i] ~= expected[i] then
+    if not (approved_rows and approved_rows[i]) and actual[i] ~= expected[i] then
       return false
     end
   end
@@ -301,13 +358,18 @@ local function count_matching_prefix_lines(expected_lines, current_lines)
   return count
 end
 
-local function summarize_hunk(hunk_state, current_lines)
+local function summarize_hunk(hunk_state, current_lines, approved_rows)
+  if hunk_state.rejected then
+    hunk_state.insert_started = false
+    return 'rejected', 'hidden', 'rejected'
+  end
+
   local analysis = ensure_hunk_analysis(hunk_state.hunk)
   local old_count = #analysis.tracked_old_lines
   local new_count = #analysis.tracked_new_lines
   local current_count = #current_lines
 
-  if lines_match(current_lines, analysis.tracked_new_lines) then
+  if lines_match(current_lines, analysis.tracked_new_lines, approved_rows) then
     hunk_state.insert_started = false
     return 'done', 'completed', 'done'
   end
@@ -363,6 +425,8 @@ local function snapshot_state(buf, state)
         end_row = end_row,
         hunk = vim.deepcopy(hunk.hunk),
         insert_started = hunk.insert_started,
+        rejected = hunk.rejected,
+        approved_rows = normalize_approved_rows(vim.tbl_keys(get_approved_relative_rows(buf, hunk, start_row))),
       }
     end
   end
@@ -409,6 +473,14 @@ local function create_hunk(buf, spec)
   local end_mark = vim.api.nvim_buf_set_extmark(buf, ANCHOR_NS, spec.end_row, 0, {
     right_gravity = true,
   })
+  local approved_line_marks = {}
+
+  for _, relative_row in ipairs(spec.approved_rows or {}) do
+    local mark_id = vim.api.nvim_buf_set_extmark(buf, ANCHOR_NS, spec.start_row + relative_row - 1, 0, {
+      right_gravity = false,
+    })
+    approved_line_marks[#approved_line_marks + 1] = mark_id
+  end
 
   return {
     index = spec.index,
@@ -416,7 +488,147 @@ local function create_hunk(buf, spec)
     start_mark = start_mark,
     end_mark = end_mark,
     insert_started = spec.insert_started or false,
+    rejected = spec.rejected or false,
+    approved_line_marks = approved_line_marks,
   }
+end
+
+local function find_hunk_by_cursor(buf, opts)
+  opts = opts or {}
+  local state = ACTIVE[buf]
+  if not state or #state.hunks == 0 then
+    return nil
+  end
+
+  local cursor = vim.api.nvim_win_get_cursor(0)[1] - 1
+  local best_hunk
+  local best_distance
+
+  for _, hunk in ipairs(state.hunks) do
+    if not (opts.include_rejected == false and hunk.rejected) then
+      local start_row, end_row = get_hunk_rows(buf, hunk)
+      if start_row ~= nil and end_row ~= nil then
+        if cursor >= start_row and cursor <= math.max(end_row - 1, start_row) then
+          return hunk, start_row, end_row
+        end
+
+        local distance
+        if cursor < start_row then
+          distance = start_row - cursor
+        else
+          distance = cursor - math.max(end_row - 1, start_row)
+        end
+
+        if best_distance == nil or distance < best_distance then
+          best_hunk = hunk
+          best_distance = distance
+        end
+      end
+    end
+  end
+
+  if not best_hunk then
+    return nil
+  end
+
+  local start_row, end_row = get_hunk_rows(buf, best_hunk)
+  return best_hunk, start_row, end_row
+end
+
+local function reject_current_hunk(buf)
+  local state = ACTIVE[buf]
+  if not state then
+    return false, 'No active manual apply session in this buffer'
+  end
+
+  local hunk = find_hunk_by_cursor(buf, { include_rejected = false })
+  if not hunk then
+    return false, 'No active hunk near the cursor'
+  end
+
+  hunk.rejected = true
+  state.history = state.history or {}
+  state.history[#state.history + 1] = {
+    type = 'reject_hunk',
+    hunk_index = hunk.index,
+  }
+
+  render_overlay(buf)
+  jump_to_hunk(buf, 1)
+  return true
+end
+
+local function approve_current_line(buf)
+  local state = ACTIVE[buf]
+  if not state then
+    return false, 'No active manual apply session in this buffer'
+  end
+
+  local hunk, start_row, end_row = find_hunk_by_cursor(buf, { include_rejected = false })
+  if not hunk then
+    return false, 'No active hunk near the cursor'
+  end
+
+  local cursor_row = vim.api.nvim_win_get_cursor(0)[1] - 1
+  if cursor_row < start_row or cursor_row >= end_row then
+    return false, 'Cursor is not on a tracked hunk line'
+  end
+
+  local approved_rows = get_approved_relative_rows(buf, hunk, start_row)
+  local relative_row = cursor_row - start_row + 1
+  if approved_rows[relative_row] then
+    return false, 'Current line is already approved'
+  end
+
+  local mark_id = vim.api.nvim_buf_set_extmark(buf, ANCHOR_NS, cursor_row, 0, {
+    right_gravity = false,
+  })
+  hunk.approved_line_marks = hunk.approved_line_marks or {}
+  hunk.approved_line_marks[#hunk.approved_line_marks + 1] = mark_id
+
+  state.history = state.history or {}
+  state.history[#state.history + 1] = {
+    type = 'approve_line',
+    hunk_index = hunk.index,
+    mark_id = mark_id,
+  }
+
+  render_overlay(buf)
+  return true
+end
+
+local function undo_manual_apply_action(buf)
+  local state = ACTIVE[buf]
+  if not state or not state.history or #state.history == 0 then
+    return false
+  end
+
+  local action = table.remove(state.history)
+  if action.type == 'reject_hunk' then
+    local hunk = state.hunks[action.hunk_index]
+    if hunk then
+      hunk.rejected = false
+      render_overlay(buf)
+      local start_row = get_mark_row(buf, hunk.start_mark) or 0
+      set_cursor_row_clamped(0, buf, start_row, 0)
+      return true
+    end
+  elseif action.type == 'approve_line' then
+    local hunk = state.hunks[action.hunk_index]
+    if hunk then
+      vim.api.nvim_buf_del_extmark(buf, ANCHOR_NS, action.mark_id)
+      for idx, mark_id in ipairs(hunk.approved_line_marks or {}) do
+        if mark_id == action.mark_id then
+          table.remove(hunk.approved_line_marks, idx)
+          break
+        end
+      end
+      render_overlay(buf)
+      return true
+    end
+  end
+
+  return false
 end
 
 local function jump_to_hunk(buf, direction)
@@ -429,19 +641,39 @@ local function jump_to_hunk(buf, direction)
   local candidate
 
   for _, hunk in ipairs(state.hunks) do
-    local start_row = get_mark_row(buf, hunk.start_mark)
-    if start_row ~= nil then
-      if direction > 0 and start_row > cursor and (candidate == nil or start_row < candidate) then
-        candidate = start_row
-      elseif direction < 0 and start_row < cursor and (candidate == nil or start_row > candidate) then
-        candidate = start_row
+    if not hunk.rejected then
+      local start_row = get_mark_row(buf, hunk.start_mark)
+      if start_row ~= nil then
+        if direction > 0 and start_row > cursor and (candidate == nil or start_row < candidate) then
+          candidate = start_row
+        elseif direction < 0 and start_row < cursor and (candidate == nil or start_row > candidate) then
+          candidate = start_row
+        end
       end
     end
   end
 
   if candidate == nil then
-    local edge = direction > 0 and state.hunks[1] or state.hunks[#state.hunks]
-    candidate = get_mark_row(buf, edge.start_mark) or 0
+    if direction > 0 then
+      for _, hunk in ipairs(state.hunks) do
+        if not hunk.rejected then
+          candidate = get_mark_row(buf, hunk.start_mark) or 0
+          break
+        end
+      end
+    else
+      for idx = #state.hunks, 1, -1 do
+        local hunk = state.hunks[idx]
+        if not hunk.rejected then
+          candidate = get_mark_row(buf, hunk.start_mark) or 0
+          break
+        end
+      end
+    end
+  end
+
+  if candidate == nil then
+    return false
   end
 
   return set_cursor_row_clamped(0, buf, candidate, 0)
@@ -458,14 +690,16 @@ local function materialize_next_guided_line(buf)
   local best_distance
 
   for _, hunk in ipairs(state.hunks) do
-    local current_lines, start_row = get_hunk_lines(buf, hunk)
-    local _, _, phase = summarize_hunk(hunk, current_lines)
-    if phase == 'insert' then
-      local insert_row = start_row + #current_lines
-      local distance = math.abs(insert_row - cursor_row)
-      if best_distance == nil or distance < best_distance then
-        best_insert_row = insert_row
-        best_distance = distance
+    if not hunk.rejected then
+      local current_lines, start_row = get_hunk_lines(buf, hunk)
+      local _, _, phase = summarize_hunk(hunk, current_lines)
+      if phase == 'insert' then
+        local insert_row = start_row + #current_lines
+        local distance = math.abs(insert_row - cursor_row)
+        if best_distance == nil or distance < best_distance then
+          best_insert_row = insert_row
+          best_distance = distance
+        end
       end
     end
   end
@@ -477,6 +711,47 @@ local function materialize_next_guided_line(buf)
   vim.api.nvim_buf_set_lines(buf, best_insert_row, best_insert_row, false, { '' })
   set_cursor_row_clamped(0, buf, best_insert_row, 0)
   vim.cmd.startinsert()
+  return true
+end
+
+local function complete_current_line(buf)
+  local hunk, start_row = find_hunk_by_cursor(buf, { include_rejected = false })
+  if not hunk then
+    return false, 'No active hunk near the cursor'
+  end
+
+  local analysis = ensure_hunk_analysis(hunk.hunk)
+  local current_lines = get_hunk_lines(buf, hunk)
+  local approved_rows = get_approved_relative_rows(buf, hunk, start_row)
+  local status, _, phase = summarize_hunk(hunk, current_lines, approved_rows)
+  if status == 'done' then
+    return false, 'Current hunk already matches the target text'
+  end
+
+  local cursor_row = vim.api.nvim_win_get_cursor(0)[1] - 1
+  local relative_row = math.max(cursor_row - start_row + 1, 1)
+  local target_line = analysis.tracked_new_lines[relative_row]
+
+  if phase == 'insert' and target_line then
+    if relative_row <= #current_lines then
+      vim.api.nvim_buf_set_lines(buf, start_row + relative_row - 1, start_row + relative_row, false, { target_line })
+    else
+      vim.api.nvim_buf_set_lines(buf, start_row + #current_lines, start_row + #current_lines, false, { target_line })
+    end
+    return true
+  end
+
+  return false, 'Line autocomplete is only available during the insert phase'
+end
+
+local function complete_current_hunk(buf)
+  local hunk, start_row, end_row = find_hunk_by_cursor(buf, { include_rejected = false })
+  if not hunk then
+    return false, 'No active hunk near the cursor'
+  end
+
+  local analysis = ensure_hunk_analysis(hunk.hunk)
+  vim.api.nvim_buf_set_lines(buf, start_row, end_row, false, analysis.tracked_new_lines)
   return true
 end
 
@@ -639,18 +914,34 @@ render_overlay = function(buf)
   clear_render(buf)
 
   local completed = true
+  local rejected_count = 0
 
   for _, hunk in ipairs(state.hunks) do
     local analysis = ensure_hunk_analysis(hunk.hunk)
     local current_lines, start_row = get_hunk_lines(buf, hunk)
-    local status, detail, phase = summarize_hunk(hunk, current_lines)
+    local approved_rows = get_approved_relative_rows(buf, hunk, start_row)
+    local approved_count = #vim.tbl_keys(approved_rows)
+    local status, detail, phase = summarize_hunk(hunk, current_lines, approved_rows)
     local header_row = start_row or 0
+
+    if hunk.rejected then
+      rejected_count = rejected_count + 1
+      completed = false
+      goto continue
+    end
 
     vim.api.nvim_buf_set_extmark(buf, RENDER_NS, header_row, 0, {
       virt_lines = {
         {
           {
-            string.format('manual apply hunk %d/%d [%s: %s]', hunk.index, #state.hunks, status, detail),
+            string.format(
+              'manual apply hunk %d/%d [%s: %s%s]',
+              hunk.index,
+              #state.hunks,
+              status,
+              detail,
+              approved_count > 0 and string.format(', %d approved line(s)', approved_count) or ''
+            ),
             'CodexManualApplyHeader',
           },
         },
@@ -663,7 +954,9 @@ render_overlay = function(buf)
       local row = start_row + i - 1
       local actual = current_lines[i]
 
-      if phase == 'done' then
+      if approved_rows[i] then
+        -- Approved lines are treated as accepted without adding any overlay.
+      elseif phase == 'done' then
         vim.api.nvim_buf_set_extmark(buf, RENDER_NS, row, 0, {
           end_row = row,
           end_col = #actual,
@@ -731,9 +1024,26 @@ render_overlay = function(buf)
       })
     end
 
-    if not lines_match(current_lines, analysis.tracked_new_lines) then
+    if not lines_match(current_lines, analysis.tracked_new_lines, approved_rows) then
       completed = false
     end
+
+    ::continue::
+  end
+
+  if rejected_count > 0 then
+    vim.api.nvim_buf_set_extmark(buf, RENDER_NS, 0, 0, {
+      virt_lines = {
+        {
+          {
+            string.format('%d manual apply hunk(s) rejected; press u to restore the latest one', rejected_count),
+            'CodexManualApplyHeader',
+          },
+        },
+      },
+      virt_lines_above = true,
+      priority = 181,
+    })
   end
 
   if completed and not state.result_written then
@@ -776,6 +1086,10 @@ local function attach_buffer(buf)
   })
 
   vim.keymap.set('n', 'u', function()
+    if undo_manual_apply_action(buf) then
+      return
+    end
+
     if not ACTIVE[buf] and M.restore_current() then
       return
     end
@@ -797,6 +1111,45 @@ local function attach_buffer(buf)
     buffer = buf,
     silent = true,
     desc = 'Materialize next guided insert line',
+  })
+
+  vim.keymap.set('n', '<Space>;', function()
+    local ok, err = reject_current_hunk(buf)
+    if ok then
+      return
+    end
+
+    notify(err, vim.log.levels.WARN)
+  end, {
+    buffer = buf,
+    silent = true,
+    desc = 'Reject current manual apply hunk',
+  })
+
+  vim.keymap.set('n', '<Space>b', function()
+    local ok, err = complete_current_line(buf)
+    if ok then
+      return
+    end
+
+    notify(err, vim.log.levels.WARN)
+  end, {
+    buffer = buf,
+    silent = true,
+    desc = 'Autocomplete current manual apply line',
+  })
+
+  vim.keymap.set('n', '<Space>\\', function()
+    local ok, err = approve_current_line(buf)
+    if ok then
+      return
+    end
+
+    notify(err, vim.log.levels.WARN)
+  end, {
+    buffer = buf,
+    silent = true,
+    desc = 'Approve current manual apply line',
   })
 
   vim.keymap.set('i', '<Tab>', manual_apply_tab, {
@@ -885,6 +1238,7 @@ function M.restore_current()
     approval_id = snapshot.approval_id,
     target_path = snapshot.target_path,
     result_written = snapshot.result_written,
+    history = {},
     hunks = {},
   }
 
@@ -945,8 +1299,7 @@ function M.run(payload_path)
     end
 
     if change.path == target_path then
-      local diff = type(change.diff) == 'string' and change.diff or ''
-      local parsed_hunks, parse_err = parse_diff(diff)
+      local parsed_hunks, parse_err = parse_change_hunks(change)
       if not parsed_hunks then
         notify(parse_err, vim.log.levels.ERROR)
         return false
@@ -960,7 +1313,7 @@ function M.run(payload_path)
 
   sort_hunks(all_hunks)
 
-  if vim.fn.filereadable(target_path) ~= 1 then
+  if data.changes[1].kind ~= 'add' and vim.fn.filereadable(target_path) ~= 1 then
     notify('Target file does not exist: ' .. target_path, vim.log.levels.ERROR)
     return false
   end
@@ -981,6 +1334,7 @@ function M.run(payload_path)
     approval_id = data.approval_id,
     target_path = target_path,
     result_written = false,
+    history = {},
     hunks = {},
   }
 
