@@ -6,6 +6,7 @@ local RENDER_NS = vim.api.nvim_create_namespace 'CodexManualApplyRender'
 local ACTIVE = {}
 local LAST_CLEARED = {}
 local render_overlay
+local jump_to_hunk
 
 local function ensure_highlights()
   vim.api.nvim_set_hl(0, 'CodexManualApplyPending', { link = 'Comment', default = true })
@@ -631,7 +632,7 @@ local function undo_manual_apply_action(buf)
   return false
 end
 
-local function jump_to_hunk(buf, direction)
+jump_to_hunk = function(buf, direction)
   local state = ACTIVE[buf]
   if not state or #state.hunks == 0 then
     return false
