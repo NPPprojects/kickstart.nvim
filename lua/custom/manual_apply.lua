@@ -1062,15 +1062,7 @@ local function attach_buffer(buf)
 
   vim.b[buf].codex_manual_apply_attached = true
 
-  vim.keymap.set('n', '<leader>m', function()
-    M.clear_current()
-  end, {
-    buffer = buf,
-    silent = true,
-    desc = 'Complete Codex manual apply session',
-  })
-
-  vim.keymap.set('n', '<leader>.', function()
+  vim.keymap.set('n', '<leader>m.', function()
     jump_to_hunk(buf, 1)
   end, {
     buffer = buf,
@@ -1078,7 +1070,7 @@ local function attach_buffer(buf)
     desc = 'Next Codex manual apply hunk',
   })
 
-  vim.keymap.set('n', '<leader>,', function()
+  vim.keymap.set('n', '<leader>m,', function()
     jump_to_hunk(buf, -1)
   end, {
     buffer = buf,
@@ -1102,7 +1094,7 @@ local function attach_buffer(buf)
     desc = 'Undo or restore Codex manual apply overlay',
   })
 
-  vim.keymap.set('n', '<leader>i', function()
+  vim.keymap.set('n', '<leader>mi', function()
     if materialize_next_guided_line(buf) then
       return
     end
@@ -1114,7 +1106,7 @@ local function attach_buffer(buf)
     desc = 'Materialize next guided insert line',
   })
 
-  vim.keymap.set('n', '<Space>;', function()
+  vim.keymap.set('n', '<leader>mc', function()
     local ok, err = reject_current_hunk(buf)
     if ok then
       return
@@ -1127,7 +1119,7 @@ local function attach_buffer(buf)
     desc = 'Reject current manual apply hunk',
   })
 
-  vim.keymap.set('n', '<Space>b', function()
+  vim.keymap.set('n', '<leader>ml', function()
     local ok, err = complete_current_line(buf)
     if ok then
       return
@@ -1140,7 +1132,7 @@ local function attach_buffer(buf)
     desc = 'Autocomplete current manual apply line',
   })
 
-  vim.keymap.set('n', '<Space>\\', function()
+  vim.keymap.set('n', '<leader>ma', function()
     local ok, err = approve_current_line(buf)
     if ok then
       return
@@ -1151,6 +1143,27 @@ local function attach_buffer(buf)
     buffer = buf,
     silent = true,
     desc = 'Approve current manual apply line',
+  })
+
+  vim.keymap.set('n', '<leader>m/', function()
+    local ok, err = complete_current_hunk(buf)
+    if ok then
+      return
+    end
+
+    notify(err, vim.log.levels.WARN)
+  end, {
+    buffer = buf,
+    silent = true,
+    desc = 'Autocomplete current manual apply hunk',
+  })
+
+  vim.keymap.set('n', '<leader>mm', function()
+    M.clear_current()
+  end, {
+    buffer = buf,
+    silent = true,
+    desc = 'Complete Codex manual apply session',
   })
 
   vim.keymap.set('i', '<Tab>', manual_apply_tab, {
