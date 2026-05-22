@@ -873,6 +873,22 @@ require('lazy').setup({
         --
         -- See :h blink-cmp-config-keymap for defining your own keymap
         preset = 'super-tab',
+        ['<Tab>'] = {
+          function(cmp)
+            local ok, cursortab = pcall(require, 'cursortab')
+            if ok and cursortab.accept() then
+              return true
+            end
+
+            if cmp.snippet_active() then
+              return cmp.accept()
+            end
+
+            return cmp.select_and_accept()
+          end,
+          'snippet_forward',
+          'fallback',
+        },
 
         -- For more advanced Luasnip keymaps (e.g. selecting choice nodes, expansion) see:
         --    https://github.com/L3MON4D3/LuaSnip?tab=readme-ov-file#keymaps
@@ -891,9 +907,16 @@ require('lazy').setup({
       },
 
       sources = {
-        default = { 'lsp', 'path', 'snippets', 'lazydev' },
+        default = { 'lsp', 'path', 'snippets', 'lazydev', 'cursortab' },
         providers = {
           lazydev = { module = 'lazydev.integrations.blink', score_offset = 100 },
+          cursortab = {
+            module = 'cursortab.blink',
+            name = 'cursortab',
+            async = true,
+            timeout_ms = 5000,
+            score_offset = 50,
+          },
         },
       },
 
