@@ -1,17 +1,17 @@
 return {
-	"nvim-flutter/flutter-tools.nvim",
+	'nvim-flutter/flutter-tools.nvim',
 	lazy = false,
 
 	dependencies = {
-		"nvim-lua/plenary.nvim",
-		"stevearc/dressing.nvim",
+		'nvim-lua/plenary.nvim',
+		'stevearc/dressing.nvim',
 	},
 
 	config = function()
-		require("flutter-tools").setup({
+		require('flutter-tools').setup {
 			ui = {
-				border = "rounded",
-				notification_style = "native",
+				border = 'rounded',
+				notification_style = 'native',
 			},
 
 			decorations = {
@@ -19,16 +19,15 @@ return {
 			},
 
 			widget_guides = { enabled = true },
-			outline = { open_cmd = "30vnew" },
+			outline = { open_cmd = '30vnew' },
 
 			lsp = {
 				-- IMPORTANT:
 				-- Do NOT provide on_attach or capabilities, Kickstart handles that.
 				--
-				color = { enabled = true, background = true },
 				settings = {
 					showTodos = true,
-					renameFilesWithClasses = "prompt",
+					renameFilesWithClasses = 'prompt',
 					updateImportsOnRename = true,
 				},
 			},
@@ -42,6 +41,6 @@ return {
 				autostart = false,
 				auto_open_browser = false,
 			},
-		})
+		}
 	end,
 }

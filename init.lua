@@ -202,8 +202,6 @@ vim.keymap.set('n', '<C-k>', '<C-w><C-k>', { desc = 'Move focus to the upper win
 vim.keymap.set({ 'n', 'v' }, 'H', '^', { noremap = true, silent = true, desc = 'Line start' })
 vim.keymap.set({ 'n', 'v' }, 'L', 'g_', { noremap = true, silent = true, desc = 'Line end (non-blank)' })
 
-
-
 vim.keymap.set('n', '<leader>v', ':vsplit ', { noremap = true })
 vim.keymap.set('n', '<leader>h', ':split ', { noremap = true })
 
@@ -447,9 +445,8 @@ require('lazy').setup({
       vim.keymap.set('n', '<leader><leader>', builtin.buffers, { desc = '[ ] Find existing buffers' })
 
       -- Toggle folds manually
-      vim.keymap.set("n", "zR", require("ufo").openAllFolds, { desc = "Open all folds" })
-      vim.keymap.set("n", "zM", require("ufo").closeAllFolds, { desc = "Close all folds" })
-
+      vim.keymap.set('n', 'zR', require('ufo').openAllFolds, { desc = 'Open all folds' })
+      vim.keymap.set('n', 'zM', require('ufo').closeAllFolds, { desc = 'Close all folds' })
 
       --controls for rezising windows
 
@@ -458,20 +455,15 @@ require('lazy').setup({
       vim.keymap.set('n', '<C-Up>', require('smart-splits').resize_up)
       vim.keymap.set('n', '<C-Down>', require('smart-splits').resize_down)
 
-
       vim.keymap.set('n', '<M-Left>', require('smart-splits').swap_buf_left, { noremap = true, silent = true })
       vim.keymap.set('n', '<M-Down>', require('smart-splits').swap_buf_down, { noremap = true, silent = true })
       vim.keymap.set('n', '<M-Up>', require('smart-splits').swap_buf_up, { noremap = true, silent = true })
       vim.keymap.set('n', '<M-Right>', require('smart-splits').swap_buf_right, { noremap = true, silent = true })
 
       -- pasted over things go to black hole register
-      vim.keymap.set("x", "p", '"_dP', { noremap = true, silent = true })
-
-
+      vim.keymap.set('x', 'p', '"_dP', { noremap = true, silent = true })
 
       -- You can still use zf, zd, zo, zc for manual control
-
-
 
       -- Slightly advanced example of overriding default behavior and theme
       vim.keymap.set('n', '<leader>/', function()
@@ -1071,12 +1063,12 @@ require('lazy').setup({
   },
 })
 
-vim.keymap.set('n', 'zZ', vim.lsp.buf.code_action,
-  { noremap = true, silent = true, desc = "LSP Code Action" })
+vim.keymap.set('n', 'zZ', vim.lsp.buf.code_action, { noremap = true, silent = true, desc = 'LSP Code Action' })
 
-
+--Colors
+vim.lsp.document_color.enable()
 --Folds Saving
-require("save_folds").setup()
+require('save_folds').setup()
 -- File: ~/.config/nvim/lua/custom/init.lua
 
 vim.api.nvim_create_autocmd('FileType', {
@@ -1106,12 +1098,10 @@ vim.api.nvim_create_autocmd('BufReadPost', {
 --Custom commands
 
 vim.api.nvim_create_user_command('Snmap', function()
-  vim.cmd("redir @a | silent nmap | redir END | new | put a")
+  vim.cmd 'redir @a | silent nmap | redir END | new | put a'
 end, {})
 
-
-require("custom.keymaps.flutter")
-
+require 'custom.keymaps.flutter'
 
 -- The line beneath this is called `modeline`. See `:help modeline`
 -- vim: ts=2 sts=2 sw=2 et
