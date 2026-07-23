@@ -29,6 +29,7 @@ return {
 			})
 
 			vim.keymap.set('n', '<leader>e', ':NvimTreeToggle<CR>', { desc = 'Toggle NvimTree' })
+			vim.keymap.set('n', '<leader>r', '<cmd>NvimTreeFindFile<CR>', { desc = 'Reveal file in NvimTree' })
 		end,
 	},
 }

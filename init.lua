@@ -201,6 +201,9 @@ vim.keymap.set('n', '<C-k>', '<C-w><C-k>', { desc = 'Move focus to the upper win
 
 vim.keymap.set({ 'n', 'v' }, 'H', '^', { noremap = true, silent = true, desc = 'Line start' })
 vim.keymap.set({ 'n', 'v' }, 'L', 'g_', { noremap = true, silent = true, desc = 'Line end (non-blank)' })
+vim.keymap.set({ 'n', 'x' }, 'c', '"_c', { noremap = true, silent = true, desc = 'Change without replacing yank' })
+vim.keymap.set('n', 'dd', '"_dd', { noremap = true, silent = true, desc = 'Clear current line' })
+vim.keymap.set('x', 'd', '"_d', { noremap = true, silent = true, desc = 'Clear selection' })
 
 vim.keymap.set('n', '<leader>v', ':vsplit ', { noremap = true })
 vim.keymap.set('n', '<leader>h', ':split ', { noremap = true })
