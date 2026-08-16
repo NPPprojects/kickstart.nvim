@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`lua/custom/manual_apply.lua` implements a Neovim workflow for manually applying AI-suggested edits from a unified diff payload.
+`lua/custom/manual_apply.lua` implements a Neovim workflow for manually applying edits from either an AI-generated unified diff payload or a Git diff between two refs.
 
 The system is designed to keep the diff visible as guidance while the user edits the real file themselves. It does not auto-apply the patch, and it does not insert placeholder content just to make the overlay work.
 
@@ -14,6 +14,8 @@ At a high level:
 4. Each hunk is tracked with extmarks so it remains attached as the user edits.
 5. The renderer shows per-hunk status, delete guidance, insert guidance, and match or mismatch highlighting.
 6. When every tracked hunk exactly matches the diff's new-side text, the module writes a result file and clears the session.
+
+The standalone path skips the payload protocol. `:ManualApplyGitFile [base] target` generates the unified diff for the current file directly from Git and starts the same overlay engine without writing a result file.
 
 ## Entry Points
 
@@ -29,9 +31,24 @@ Public functions:
 
 - `require('custom.manual_apply').is_payload_path(path)`
 - `require('custom.manual_apply').run(payload_path)`
+- `require('custom.manual_apply').run_git_file(refs)`
+- `require('custom.manual_apply').complete_git_ref(arg_lead)`
 - `require('custom.manual_apply').clear_current()`
 - `require('custom.manual_apply').skip_current()`
 - `require('custom.manual_apply').restore_current()`
+
+## Standalone Git Contract
+
+Command forms:
+
+```vim
+:ManualApplyGitFile target
+:ManualApplyGitFile base target
+```
+
+With one argument, `base` defaults to `HEAD`. With two arguments, the module generates the aggregate `git diff base target` for the current buffer's repository-relative path. The refs only define the source delta; hunk placement and completion are evaluated against the current live buffer, which remains the destination.
+
+The command resolves both refs to commits, disables external diff tools and rename detection, and rejects files with no textual changes. A standalone session clears automatically when the current file matches the target side of every hunk, but it does not save the buffer or create a `.result.json` file.
 
 ## Payload Contract
 
@@ -127,7 +144,7 @@ The module keeps one active session per buffer in `ACTIVE[buf]`.
 
 Each session stores:
 
-- payload metadata
+- optional payload metadata or a standalone Git source label
 - target file path
 - whether a result file has already been written
 - an ordered list of tracked hunks
@@ -239,6 +256,8 @@ If every hunk's live tracked lines exactly match its `tracked_new_lines`:
 2. the session is cleared
 3. no snapshot is kept for restore
 
+For standalone Git sessions, the same exact-match check clears the overlay and reports completion without writing a result file.
+
 Manual dismissal happens through `skip_current()`, which writes `dismissed` and clears the session without keeping a snapshot.
 
 Manual clear through `clear_current()` also clears the session, but writes `completed` immediately.
@@ -256,6 +275,7 @@ Manual clear through `clear_current()` also clears the session, but writes `comp
 The implementation is narrower than a full patch engine.
 
 - single-file sessions only
+- standalone Git mode only operates on the current file; it does not queue all changed files
 - mixed-file payloads are partially supported by ignoring later files
 - no fuzzy search or three-way merge behavior
 - line-oriented only

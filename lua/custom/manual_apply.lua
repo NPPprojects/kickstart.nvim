@@ -20,6 +20,54 @@ local function notify(msg, level)
   vim.notify(msg, level or vim.log.levels.INFO, { title = 'Codex Manual Apply' })
 end
 
+local function run_git(root, args)
+  local command = { 'git', '-C', root }
+  vim.list_extend(command, args)
+
+  local result = vim.system(command, { text = true }):wait()
+  if result.code ~= 0 then
+    local message = vim.trim(result.stderr or '')
+    return nil, message ~= '' and message or string.format('Git exited with code %d', result.code)
+  end
+
+  return result.stdout or ''
+end
+
+local function current_file_git_context()
+  local target_path = vim.api.nvim_buf_get_name(0)
+  if target_path == '' then
+    return nil, 'Current buffer is not associated with a file'
+  end
+
+  target_path = vim.fs.normalize(vim.fn.fnamemodify(target_path, ':p'))
+  local search_path = vim.fs.dirname(target_path)
+  local root, root_err = run_git(search_path, { 'rev-parse', '--show-toplevel' })
+  if not root then
+    return nil, root_err
+  end
+
+  root = vim.fs.normalize(vim.trim(root))
+  local relative_path = vim.fs.relpath(root, target_path)
+  if not relative_path then
+    return nil, 'Current file is outside the Git repository: ' .. root
+  end
+
+  return {
+    root = root,
+    target_path = target_path,
+    relative_path = relative_path,
+  }
+end
+
+local function resolve_commit(root, ref)
+  local commit, err = run_git(root, { 'rev-parse', '--verify', ref .. '^{commit}' })
+  if not commit then
+    return nil, string.format('Invalid Git ref %q: %s', ref, err)
+  end
+
+  return vim.trim(commit)
+end
+
 local function read_json_file(path)
   local ok, lines = pcall(vim.fn.readfile, path)
   if not ok then
@@ -414,6 +462,8 @@ local function snapshot_state(buf, state)
     approval_id = state.approval_id,
     target_path = state.target_path,
     result_written = state.result_written,
+    standalone = state.standalone,
+    source_label = state.source_label,
     hunks = {},
   }
 
@@ -1048,8 +1098,13 @@ render_overlay = function(buf)
   end
 
   if completed and not state.result_written then
-    if write_result(state.payload_path, state.approval_id, 'completed') then
-      state.result_written = true
+    if state.payload_path and state.approval_id then
+      if write_result(state.payload_path, state.approval_id, 'completed') then
+        state.result_written = true
+        clear_overlay(buf, { discard_snapshot = true })
+      end
+    elseif state.standalone then
+      notify(string.format('Current file matches %s', state.source_label or 'the Git diff'))
       clear_overlay(buf, { discard_snapshot = true })
     end
   end
@@ -1224,6 +1279,88 @@ local function sort_hunks(hunks)
   end)
 end
 
+local function start_changes(changes, opts)
+  opts = opts or {}
+
+  local target_path = changes[1].path
+  if type(target_path) ~= 'string' or target_path == '' then
+    notify('Change is missing a valid target path', vim.log.levels.ERROR)
+    return false
+  end
+
+  local all_hunks = {}
+  for _, change in ipairs(changes) do
+    if type(change) ~= 'table' then
+      notify('Change must be a table', vim.log.levels.ERROR)
+      return false
+    end
+
+    if change.path == target_path then
+      local parsed_hunks, parse_err = parse_change_hunks(change)
+      if not parsed_hunks then
+        notify(parse_err, vim.log.levels.ERROR)
+        return false
+      end
+
+      for _, hunk in ipairs(parsed_hunks) do
+        all_hunks[#all_hunks + 1] = hunk
+      end
+    end
+  end
+
+  sort_hunks(all_hunks)
+
+  if changes[1].kind ~= 'add' and vim.fn.filereadable(target_path) ~= 1 then
+    notify('Target file does not exist: ' .. target_path, vim.log.levels.ERROR)
+    return false
+  end
+
+  if opts.edit ~= false then
+    vim.cmd('edit ' .. vim.fn.fnameescape(target_path))
+  elseif vim.fs.normalize(vim.api.nvim_buf_get_name(0)) ~= vim.fs.normalize(target_path) then
+    notify('Current buffer does not match the Git diff target: ' .. target_path, vim.log.levels.ERROR)
+    return false
+  end
+
+  local buf = vim.api.nvim_get_current_buf()
+  local specs, spec_err = build_session_specs(buf, all_hunks)
+  if not specs then
+    notify(spec_err, vim.log.levels.ERROR)
+    return false
+  end
+
+  clear_overlay(buf, { discard_snapshot = true })
+
+  local state = {
+    payload_path = opts.payload_path,
+    approval_id = opts.approval_id,
+    target_path = target_path,
+    result_written = false,
+    standalone = opts.standalone or false,
+    source_label = opts.source_label,
+    history = {},
+    hunks = {},
+  }
+
+  for _, spec in ipairs(specs) do
+    state.hunks[#state.hunks + 1] = create_hunk(buf, spec)
+  end
+
+  ACTIVE[buf] = state
+  ensure_highlights()
+  attach_buffer(buf)
+  render_overlay(buf)
+
+  if ACTIVE[buf] then
+    local first_row = get_mark_row(buf, state.hunks[1].start_mark) or 0
+    set_cursor_row_clamped(0, buf, first_row, 0)
+    local suffix = state.source_label and ' from ' .. state.source_label or ''
+    notify(string.format('Tracking %d manual apply hunk(s)%s', #state.hunks, suffix))
+  end
+
+  return true
+end
+
 function M.clear_current()
   local buf = vim.api.nvim_get_current_buf()
   local state = ACTIVE[buf]
@@ -1252,6 +1389,8 @@ function M.restore_current()
     approval_id = snapshot.approval_id,
     target_path = snapshot.target_path,
     result_written = snapshot.result_written,
+    standalone = snapshot.standalone,
+    source_label = snapshot.source_label,
     history = {},
     hunks = {},
   }
@@ -1299,73 +1438,122 @@ function M.run(payload_path)
     return false
   end
 
-  local target_path = data.changes[1].path
-  if type(target_path) ~= 'string' or target_path == '' then
-    notify('Payload change is missing a valid target path', vim.log.levels.ERROR)
-    return false
-  end
-
-  local all_hunks = {}
-  for _, change in ipairs(data.changes) do
-    if type(change) ~= 'table' then
-      notify('Payload change must be a table', vim.log.levels.ERROR)
-      return false
-    end
-
-    if change.path == target_path then
-      local parsed_hunks, parse_err = parse_change_hunks(change)
-      if not parsed_hunks then
-        notify(parse_err, vim.log.levels.ERROR)
-        return false
-      end
-
-      for _, hunk in ipairs(parsed_hunks) do
-        all_hunks[#all_hunks + 1] = hunk
-      end
-    end
-  end
-
-  sort_hunks(all_hunks)
-
-  if data.changes[1].kind ~= 'add' and vim.fn.filereadable(target_path) ~= 1 then
-    notify('Target file does not exist: ' .. target_path, vim.log.levels.ERROR)
-    return false
-  end
-
-  vim.cmd('edit ' .. vim.fn.fnameescape(target_path))
-
-  local buf = vim.api.nvim_get_current_buf()
-  local specs, spec_err = build_session_specs(buf, all_hunks)
-  if not specs then
-    notify(spec_err, vim.log.levels.ERROR)
-    return false
-  end
-
-  clear_overlay(buf, { discard_snapshot = true })
-
-  local state = {
+  return start_changes(data.changes, {
     payload_path = payload_path,
     approval_id = data.approval_id,
-    target_path = target_path,
-    result_written = false,
-    history = {},
-    hunks = {},
-  }
+  })
+end
 
-  for _, spec in ipairs(specs) do
-    state.hunks[#state.hunks + 1] = create_hunk(buf, spec)
+function M.run_git_file(refs)
+  refs = refs or {}
+  if #refs < 1 or #refs > 2 then
+    notify('Usage: ManualApplyGitFile [base] target', vim.log.levels.ERROR)
+    return false
   end
 
-  ACTIVE[buf] = state
-  ensure_highlights()
-  attach_buffer(buf)
-  render_overlay(buf)
+  local context, context_err = current_file_git_context()
+  if not context then
+    notify(context_err, vim.log.levels.ERROR)
+    return false
+  end
 
-  local first_row = get_mark_row(buf, state.hunks[1].start_mark) or 0
-  set_cursor_row_clamped(0, buf, first_row, 0)
-  notify(string.format('Tracking %d manual apply hunk(s)', #state.hunks))
+  local base_ref = #refs == 1 and 'HEAD' or refs[1]
+  local target_ref = refs[#refs]
+  local base_commit, base_err = resolve_commit(context.root, base_ref)
+  if not base_commit then
+    notify(base_err, vim.log.levels.ERROR)
+    return false
+  end
 
-  return true
+  local target_commit, target_err = resolve_commit(context.root, target_ref)
+  if not target_commit then
+    notify(target_err, vim.log.levels.ERROR)
+    return false
+  end
+
+  local status_output, status_err = run_git(context.root, {
+    'diff',
+    '--no-renames',
+    '--name-status',
+    base_commit,
+    target_commit,
+    '--',
+    context.relative_path,
+  })
+  if not status_output then
+    notify(status_err, vim.log.levels.ERROR)
+    return false
+  end
+
+  local status = status_output:match '^([A-Z])'
+  if not status then
+    notify(string.format('No changes for %s between %s and %s', context.relative_path, base_ref, target_ref))
+    return false
+  end
+
+  local diff, diff_err = run_git(context.root, {
+    'diff',
+    '--no-ext-diff',
+    '--no-color',
+    '--no-renames',
+    '--unified=3',
+    base_commit,
+    target_commit,
+    '--',
+    context.relative_path,
+  })
+  if not diff then
+    notify(diff_err, vim.log.levels.ERROR)
+    return false
+  end
+
+  if diff == '' then
+    notify(string.format('No textual changes for %s between %s and %s', context.relative_path, base_ref, target_ref))
+    return false
+  end
+
+  local kind = status == 'A' and 'add' or status == 'D' and 'delete' or 'update'
+  return start_changes({
+    {
+      path = context.target_path,
+      kind = kind,
+      diff = diff,
+    },
+  }, {
+    edit = false,
+    standalone = true,
+    source_label = string.format('%s -> %s', base_ref, target_ref),
+  })
+end
+
+function M.complete_git_ref(arg_lead)
+  local context = current_file_git_context()
+  if not context then
+    return {}
+  end
+
+  local output = run_git(context.root, {
+    'for-each-ref',
+    '--format=%(refname:short)',
+    'refs/heads',
+    'refs/remotes',
+    'refs/tags',
+  })
+  if not output then
+    return {}
+  end
+
+  local matches = {}
+  local seen = {}
+  for _, ref in ipairs(vim.list_extend({ 'HEAD' }, vim.split(output, '\n', { plain = true, trimempty = true }))) do
+    if not seen[ref] and vim.startswith(ref, arg_lead) then
+      matches[#matches + 1] = ref
+      seen[ref] = true
+    end
+  end
+
+  table.sort(matches)
+  return matches
 end
 
 return M

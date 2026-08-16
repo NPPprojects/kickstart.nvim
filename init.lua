@@ -1098,6 +1098,16 @@ vim.api.nvim_create_autocmd('BufReadPost', {
 
 --Custom commands
 
+vim.api.nvim_create_user_command('ManualApplyGitFile', function(opts)
+  require('custom.manual_apply').run_git_file(opts.fargs)
+end, {
+  nargs = '+',
+  complete = function(arg_lead)
+    return require('custom.manual_apply').complete_git_ref(arg_lead)
+  end,
+  desc = 'Manually apply the Git diff for the current file',
+})
+
 vim.api.nvim_create_user_command('Snmap', function()
   vim.cmd 'redir @a | silent nmap | redir END | new | put a'
 end, {})
