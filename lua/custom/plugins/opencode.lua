@@ -31,7 +31,7 @@ return {
 
 	config = function()
 		local function save_current_buffer()
-			vim.cmd.write();
+			vim.cmd.write()
 		end
 		---@type opencode.Opts
 		vim.g.opencode_opts = {
